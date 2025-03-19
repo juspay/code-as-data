@@ -35,7 +35,21 @@ def replace_all(text, replacements):
 
 
 def get_module_name(base_dir_path, path, to_replace=""):
-    path = path.replace(base_dir_path, "")
+    path = (
+        path.replace(base_dir_path, "")
+        .replace(".hs.json", "")
+        .replace(".hs.module_imports.json", "")
+        .replace(".hs.function_code.json", "")
+        .replace(".hs.types_code.json", "")
+        .replace(".hs.class_code.json", "")
+        .replace(".hs.instance_code.json", "")
+        .replace(".hs.fieldUsage.json", "")
+        .replace(".hs.typeUpdates.json", "")
+        .replace(".hs.types.parser.json", "")
+        .replace("app/", "")
+        .replace("dist/", "")
+        .replace("build/autogen/", "")
+    )
     patterns = [
         ("src/", "src/"),
         ("src-generated/", "src-generated/"),
@@ -48,7 +62,8 @@ def get_module_name(base_dir_path, path, to_replace=""):
             path = path.split(split_pattern)[-1]
             break
     # path = Path(path).stem
-    module_name = replace_all(path, [("/", "."), (to_replace, "")])
+    module_name = replace_all(path, [("/", ".")])
+    print(module_name, path)
     return module_name
 
 

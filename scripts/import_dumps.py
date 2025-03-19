@@ -32,11 +32,8 @@ def import_dumps(fdep_path: str, field_inspector_path: str, clear_db: bool = Fal
         print(f"Error: Path not found: {field_inspector_path}")
         sys.exit(1)
 
-    # Initialize database session
-    db = SessionLocal()
-
     # Initialize dump service
-    dump_service = DumpService(db, fdep_path, field_inspector_path)
+    dump_service = DumpService(fdep_path, field_inspector_path)
 
     # # Clear database if requested
     # if clear_db:
@@ -48,7 +45,7 @@ def import_dumps(fdep_path: str, field_inspector_path: str, clear_db: bool = Fal
     #         "CASCADE"
     #     )
     #     db.commit()
-
+    db = SessionLocal()
     # Clear database if requested
     if clear_db:
         print("Clearing existing data...")

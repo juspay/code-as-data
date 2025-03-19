@@ -4,9 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import logging
+from sqlalchemy.orm import scoped_session
 
 logging.basicConfig()
-logging.getLogger('sqlalchemy.engine').setLevel(logging.ERROR)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
 # Load environment variables
 load_dotenv()
 
@@ -21,10 +22,12 @@ DB_NAME = os.getenv("DB_NAME", "code_analysis")
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create engine
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_size=300, max_overflow=100)
 
 # Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = scoped_session(
+    sessionmaker(autoflush=True, bind=engine)
+)
 
 # Create base class for models
 Base = declarative_base()
