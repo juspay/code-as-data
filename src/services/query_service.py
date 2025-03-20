@@ -1,6 +1,9 @@
-from typing import Dict, List, Optional, Any
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from typing import Dict, List, Optional, Any, Union, Callable
+from sqlalchemy.orm import Session, joinedload, aliased
+from sqlalchemy import func, and_, or_, not_, text
+from sqlalchemy.sql import operators
+from sqlalchemy.sql.expression import cast
+from sqlalchemy.types import String, Integer, Boolean, JSON
 
 from src.db.models import (
     Module as DBModule,
@@ -13,11 +16,63 @@ from src.db.models import (
     Class as DBClass,
     Instance as DBInstance,
     InstanceFunction as DBInstanceFunction,
+    function_dependency,
+    type_dependency,
 )
 
 
+# Define query operator mappings
+OPERATORS = {
+    "eq": operators.eq,
+    "ne": operators.ne,
+    "gt": operators.gt,
+    "lt": operators.lt,
+    "ge": operators.ge,
+    "le": operators.le,
+    "like": operators.like_op,
+    "ilike": operators.ilike_op,
+    "in": operators.in_op,
+    "not_in": operators.notin_op,
+    "contains": lambda column, value: column.contains(value),
+    "startswith": lambda column, value: column.startswith(value),
+    "endswith": lambda column, value: column.endswith(value),
+    "between": lambda column, value: column.between(value[0], value[1]),
+    "is_null": lambda column, value: column.is_(None) if value else column.isnot(None),
+}
+
+
+class QueryNode:
+    """Represents a node in the query parse tree."""
+
+    def __init__(
+        self,
+        type_name: str,
+        conditions: List[Dict] = None,
+        children: List["QueryNode"] = None,
+    ):
+        """
+        Initialize a query node.
+
+        Args:
+            type_name: The entity type this node refers to (e.g., 'function', 'module')
+            conditions: List of condition dictionaries for this node
+            children: List of child query nodes
+        """
+        self.type_name = type_name
+        self.conditions = conditions or []
+        self.children = children or []
+
+    def add_condition(self, field: str, operator: str, value: Any) -> None:
+        """Add a condition to this node."""
+        self.conditions.append({"field": field, "operator": operator, "value": value})
+
+    def add_child(self, child: "QueryNode") -> None:
+        """Add a child node to this node."""
+        self.children.append(child)
+
+
 class QueryService:
-    """Service for querying data from the database."""
+    """Service for querying data from the database with advanced capabilities."""
 
     def __init__(self, db: Session):
         """
@@ -27,6 +82,37 @@ class QueryService:
             db: Database session
         """
         self.db = db
+
+        # Define entity mapping for query language
+        self.entity_mapping = {
+            "module": DBModule,
+            "function": DBFunction,
+            "where_function": DBWhereFunction,
+            "import": DBImport,
+            "type": DBType,
+            "constructor": DBConstructor,
+            "field": DBField,
+            "class": DBClass,
+            "instance": DBInstance,
+            # Add a special pseudo-entity for handling "called_by"
+            "calling_function": DBFunction,
+        }
+
+        # Define relationship mapping for joins
+        self.relationships = {
+            ("module", "function"): DBModule.functions,
+            ("module", "import"): DBModule.imports,
+            ("module", "type"): DBModule.types,
+            ("module", "class"): DBModule.classes,
+            ("module", "instance"): DBModule.instances,
+            ("function", "module"): DBFunction.module,
+            ("function", "where_function"): DBFunction.where_functions,
+            ("function", "called_function"): DBFunction.called_functions,
+            # Note: We'll handle "calling_function" specially in _process_join
+            # so we don't need an entry here
+        }
+
+    # ===== Original QueryService methods =====
 
     def get_all_modules(self) -> List[DBModule]:
         """
@@ -94,7 +180,6 @@ class QueryService:
             .options(
                 joinedload(DBFunction.where_functions),
                 joinedload(DBFunction.called_functions),
-                joinedload(DBFunction.called_by),
                 joinedload(DBFunction.module),
             )
             .filter(DBFunction.id == function_id)
@@ -104,275 +189,43 @@ class QueryService:
         if not function:
             return None
 
+        # Manually get the calling functions since we can't rely on called_by
+        Caller = aliased(DBFunction)
+        calling_functions = (
+            self.db.query(Caller)
+            .join(function_dependency, Caller.id == function_dependency.c.caller_id)
+            .filter(function_dependency.c.callee_id == function_id)
+            .all()
+        )
+
         return {
             "id": function.id,
             "name": function.name,
             "signature": function.function_signature,
             "raw_string": function.raw_string,
             "src_loc": function.src_loc,
-            "module": function.module.name,
+            "module": function.module.name if function.module else None,
             "where_functions": [
                 {"id": wf.id, "name": wf.name, "signature": wf.function_signature}
                 for wf in function.where_functions
             ],
             "calls": [
-                {"id": cf.id, "name": cf.name, "module": cf.module.name}
+                {
+                    "id": cf.id,
+                    "name": cf.name,
+                    "module": cf.module.name if cf.module else None,
+                }
                 for cf in function.called_functions
             ],
             "called_by": [
-                {"id": cb.id, "name": cb.name, "module": cb.module.name}
-                for cb in function.called_by
+                {
+                    "id": cf.id,
+                    "name": cf.name,
+                    "module": cf.module.name if cf.module else None,
+                }
+                for cf in calling_functions
             ],
         }
-
-    def get_types_by_module(self, module_id: int) -> List[Dict[str, Any]]:
-        """
-        Get all types for a module with their constructors and fields.
-
-        Args:
-            module_id: ID of the module
-
-        Returns:
-            List of type dictionaries
-        """
-        types = (
-            self.db.query(DBType)
-            .options(joinedload(DBType.constructors).joinedload(DBConstructor.fields))
-            .filter(DBType.module_id == module_id)
-            .all()
-        )
-
-        result = []
-        for type_obj in types:
-            constructors = []
-            for constructor in type_obj.constructors:
-                constructors.append(
-                    {
-                        "name": constructor.name,
-                        "fields": [
-                            {"name": field.field_name, "type_raw": field.field_type_raw}
-                            for field in constructor.fields
-                        ],
-                    }
-                )
-
-            result.append(
-                {
-                    "id": type_obj.id,
-                    "name": type_obj.type_name,
-                    "raw_code": type_obj.raw_code,
-                    "type_of_type": type_obj.type_of_type,
-                    "constructors": constructors,
-                }
-            )
-
-        return result
-
-    def get_type_by_name(
-        self, name: str, module_id: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        Get types by name.
-
-        Args:
-            name: Name of the type
-            module_id: Optional module ID filter
-
-        Returns:
-            List of matching type dictionaries
-        """
-        query = (
-            self.db.query(DBType)
-            .options(joinedload(DBType.constructors).joinedload(DBConstructor.fields))
-            .filter(DBType.type_name == name)
-        )
-
-        if module_id:
-            query = query.filter(DBType.module_id == module_id)
-
-        types = query.all()
-
-        result = []
-        for type_obj in types:
-            constructors = []
-            for constructor in type_obj.constructors:
-                constructors.append(
-                    {
-                        "name": constructor.name,
-                        "fields": [
-                            {"name": field.field_name, "type_raw": field.field_type_raw}
-                            for field in constructor.fields
-                        ],
-                    }
-                )
-
-            result.append(
-                {
-                    "id": type_obj.id,
-                    "name": type_obj.type_name,
-                    "raw_code": type_obj.raw_code,
-                    "type_of_type": type_obj.type_of_type,
-                    "module": type_obj.module.name,
-                    "constructors": constructors,
-                }
-            )
-
-        return result
-
-    def get_classes_by_module(self, module_id: int) -> List[DBClass]:
-        """
-        Get all classes for a module.
-
-        Args:
-            module_id: ID of the module
-
-        Returns:
-            List of classes
-        """
-        return self.db.query(DBClass).filter(DBClass.module_id == module_id).all()
-
-    def get_class_by_name(
-        self, name: str, module_id: Optional[int] = None
-    ) -> List[DBClass]:
-        """
-        Get classes by name.
-
-        Args:
-            name: Name of the class
-            module_id: Optional module ID filter
-
-        Returns:
-            List of matching classes
-        """
-        query = self.db.query(DBClass).filter(DBClass.class_name == name)
-        if module_id:
-            query = query.filter(DBClass.module_id == module_id)
-        return query.all()
-
-    def get_imports_by_module(self, module_id: int) -> List[DBImport]:
-        """
-        Get all imports for a module.
-
-        Args:
-            module_id: ID of the module
-
-        Returns:
-            List of imports
-        """
-        return self.db.query(DBImport).filter(DBImport.module_id == module_id).all()
-
-    def get_instances_by_module(self, module_id: int) -> List[Dict[str, Any]]:
-        """
-        Get all instances for a module with their associated functions.
-
-        Args:
-            module_id: ID of the module
-
-        Returns:
-            List of instance dictionaries
-        """
-        instances = (
-            self.db.query(DBInstance)
-            .options(
-                joinedload(DBInstance.instance_functions).joinedload(
-                    DBInstanceFunction.function
-                )
-            )
-            .filter(DBInstance.module_id == module_id)
-            .all()
-        )
-
-        result = []
-        for instance in instances:
-            functions = []
-            for inst_func in instance.instance_functions:
-                function = inst_func.function
-                functions.append(
-                    {
-                        "id": function.id,
-                        "name": function.name,
-                        "signature": function.function_signature,
-                    }
-                )
-
-            result.append(
-                {
-                    "id": instance.id,
-                    "definition": instance.instance_definition,
-                    "signature": instance.instance_signature,
-                    "src_loc": instance.src_loc,
-                    "functions": functions,
-                }
-            )
-
-        return result
-
-    # Advanced queries
-
-    def search_function_by_content(self, content: str) -> List[DBFunction]:
-        """
-        Search for functions containing specific content.
-
-        Args:
-            content: Content to search for
-
-        Returns:
-            List of matching functions
-        """
-        search_pattern = f"%{content}%"
-        return (
-            self.db.query(DBFunction)
-            .filter(DBFunction.raw_string.ilike(search_pattern))
-            .all()
-        )
-
-    def get_function_call_graph(
-        self, function_id: int, depth: int = 1
-    ) -> Dict[str, Any]:
-        """
-        Get a function call graph up to the specified depth.
-
-        Args:
-            function_id: ID of the function
-            depth: Maximum depth of the call graph
-
-        Returns:
-            Dictionary representing the call graph
-        """
-        function = (
-            self.db.query(DBFunction)
-            .options(
-                joinedload(DBFunction.module),
-                joinedload(DBFunction.called_functions).joinedload(DBFunction.module),
-            )
-            .filter(DBFunction.id == function_id)
-            .first()
-        )
-
-        if not function:
-            return {}
-
-        def build_graph(func, current_depth, max_depth):
-            if current_depth > max_depth:
-                return {
-                    "id": func.id,
-                    "name": func.name,
-                    "module": func.module.name,
-                    "calls": [],
-                }
-
-            calls = []
-            for called in func.called_functions:
-                calls.append(build_graph(called, current_depth + 1, max_depth))
-
-            return {
-                "id": func.id,
-                "name": func.name,
-                "module": func.module.name,
-                "calls": calls,
-            }
-
-        return build_graph(function, 1, depth)
 
     def get_most_called_functions(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -384,24 +237,22 @@ class QueryService:
         Returns:
             List of function dictionaries with call counts
         """
-        # This query uses a subquery to count incoming calls to each function
-        from sqlalchemy.sql import select, func, alias
-
-        # Create a subquery that counts incoming edges for each callee
-        call_count = (
+        # This query counts incoming calls to each function directly from the function_dependency table
+        # rather than relying on called_by
+        call_count_query = (
             self.db.query(
-                func.count().label("calls"), DBFunction.id.label("function_id")
+                function_dependency.c.callee_id.label("function_id"),
+                func.count().label("calls"),
             )
-            .join(DBFunction.called_by)
-            .group_by(DBFunction.id)
+            .group_by(function_dependency.c.callee_id)
             .subquery()
         )
 
-        # Query functions with their call counts
+        # Join with the Function table to get function details
         functions = (
-            self.db.query(DBFunction, call_count.c.calls)
-            .join(call_count, DBFunction.id == call_count.c.function_id)
-            .order_by(call_count.c.calls.desc())
+            self.db.query(DBFunction, call_count_query.c.calls)
+            .join(call_count_query, DBFunction.id == call_count_query.c.function_id)
+            .order_by(call_count_query.c.calls.desc())
             .limit(limit)
             .all()
         )
@@ -418,3 +269,752 @@ class QueryService:
             )
 
         return result
+
+    # ===== Advanced Query Capabilities =====
+
+    def parse_query(self, query_dict: Dict) -> QueryNode:
+        """
+        Parse a query dictionary into a query node tree.
+
+        Args:
+            query_dict: Dictionary representing the query
+
+        Returns:
+            Root query node
+        """
+        entity_type = query_dict.get("type", "function")
+        conditions = query_dict.get("conditions", [])
+
+        root_node = QueryNode(entity_type)
+
+        # Add conditions to root node
+        for condition in conditions:
+            field = condition.get("field")
+            operator = condition.get("operator", "eq")
+            value = condition.get("value")
+
+            if field and operator in OPERATORS:
+                root_node.add_condition(field, operator, value)
+
+        # Process join relationships
+        joins = query_dict.get("joins", [])
+        for join in joins:
+            join_type = join.get("type")
+
+            # Convert "called_by" to our internal "calling_function" representation
+            if join_type == "called_by":
+                join_type = "calling_function"
+
+            join_conditions = join.get("conditions", [])
+
+            join_node = QueryNode(join_type)
+            for condition in join_conditions:
+                field = condition.get("field")
+                operator = condition.get("operator", "eq")
+                value = condition.get("value")
+
+                if field and operator in OPERATORS:
+                    join_node.add_condition(field, operator, value)
+
+            # Process nested joins recursively
+            if "joins" in join:
+                nested_joins = join.get("joins", [])
+                for nested_join in nested_joins:
+                    nested_node = self.parse_query(nested_join)
+                    join_node.add_child(nested_node)
+
+            root_node.add_child(join_node)
+
+        return root_node
+
+    def execute_advanced_query(self, query_dict: Dict) -> List[Any]:
+        """
+        Execute an advanced query.
+
+        Args:
+            query_dict: Dictionary representing the query
+
+        Returns:
+            List of query results
+        """
+        # Parse the query into a node tree
+        query_tree = self.parse_query(query_dict)
+
+        # Build the SQLAlchemy query
+        entity_class = self.entity_mapping.get(query_tree.type_name)
+        if not entity_class:
+            raise ValueError(f"Unknown entity type: {query_tree.type_name}")
+
+        query = self.db.query(entity_class)
+
+        # Apply conditions to the root entity
+        query = self._apply_conditions(query, entity_class, query_tree.conditions)
+
+        # Process joins and their conditions
+        for child_node in query_tree.children:
+            query = self._process_join(query, entity_class, child_node)
+
+        # Execute query
+        return query.all()
+
+    def _apply_conditions(self, query, entity_class, conditions):
+        """Apply conditions to a query."""
+        for condition in conditions:
+            field = condition["field"]
+            op_name = condition["operator"]
+            value = condition["value"]
+
+            if not hasattr(entity_class, field):
+                continue
+
+            column = getattr(entity_class, field)
+            operator_func = OPERATORS.get(op_name)
+
+            if operator_func:
+                query = query.filter(operator_func(column, value))
+
+        return query
+
+    def _process_join(self, query, parent_class, node):
+        """Process a join node and add it to the query."""
+        child_class = self.entity_mapping.get(node.type_name)
+        if not child_class:
+            return query
+
+        # Handle special case for "calling_function" (functions that call the current function)
+        if node.type_name == "calling_function" and parent_class == DBFunction:
+            # Create aliases
+            Callee = aliased(DBFunction, name="callee")
+            Caller = aliased(DBFunction, name="caller")
+
+            # Get the IDs of the functions from the original query
+            function_ids = [entity.id for entity in query.all()]
+
+            # Build a new query that finds functions called by specific functions
+            new_query = (
+                self.db.query(Callee)
+                .join(function_dependency, Callee.id == function_dependency.c.callee_id)
+                .join(
+                    Caller,
+                    and_(
+                        function_dependency.c.caller_id == Caller.id,
+                        Caller.id.in_(
+                            function_ids
+                        ),  # Use direct list instead of subquery
+                    ),
+                )
+            )
+
+            # Apply conditions to the caller
+            for condition in node.conditions:
+                field = condition.get("field")
+                op_name = condition.get("operator", "eq")
+                value = condition.get("value")
+
+                if hasattr(Caller, field):
+                    column = getattr(Caller, field)
+                    operator_func = OPERATORS.get(op_name)
+
+                    if operator_func:
+                        new_query = new_query.filter(operator_func(column, value))
+
+            # Process nested joins (only for nested module joins)
+            for child_node in node.children:
+                if child_node.type_name == "module":
+                    new_query = new_query.join(Caller.module)
+                    new_query = self._apply_conditions(
+                        new_query, DBModule, child_node.conditions
+                    )
+
+            return new_query
+
+        # Normal join handling
+        relationship_key = (parent_class.__tablename__, node.type_name)
+        relationship = self.relationships.get(relationship_key)
+
+        if relationship:
+            # Add the join
+            query = query.join(relationship)
+
+            # Apply conditions to the joined entity
+            query = self._apply_conditions(query, child_class, node.conditions)
+
+            # Process nested joins
+            for child_node in node.children:
+                query = self._process_join(query, child_class, child_node)
+
+        return query
+
+    def pattern_match(self, pattern: Dict) -> List[Dict]:
+        """
+        Perform pattern matching to find code structures that match a pattern.
+
+        Args:
+            pattern: Dictionary describing the pattern to match
+
+        Returns:
+            List of matching results
+        """
+        pattern_type = pattern.get("type", "function")
+
+        if pattern_type == "function_call":
+            return self._match_function_call_pattern(pattern)
+        elif pattern_type == "type_usage":
+            return self._match_type_usage_pattern(pattern)
+        elif pattern_type == "code_structure":
+            return self._match_code_structure_pattern(pattern)
+        else:
+            raise ValueError(f"Unknown pattern type: {pattern_type}")
+
+    def _match_function_call_pattern(self, pattern: Dict) -> List[Dict]:
+        """Match patterns of function calls."""
+        caller_name = pattern.get("caller")
+        callee_name = pattern.get("callee")
+        mode = pattern.get("mode")
+
+        # Create aliases for caller and callee
+        Caller = aliased(DBFunction)
+        Callee = aliased(DBFunction)
+
+        if mode == "called_by":
+            # Find functions that are called by other functions (reverse direction)
+            query = (
+                self.db.query(Callee, Caller)
+                .join(function_dependency, Callee.id == function_dependency.c.callee_id)
+                .join(Caller, function_dependency.c.caller_id == Caller.id)
+            )
+
+            if caller_name:
+                query = query.filter(Caller.name.ilike(f"%{caller_name}%"))
+
+            if callee_name:
+                query = query.filter(Callee.name.ilike(f"%{callee_name}%"))
+
+            results = []
+            for callee, caller in query.all():
+                results.append(
+                    {
+                        "callee": {
+                            "id": callee.id,
+                            "name": callee.name,
+                            "module": callee.module.name if callee.module else None,
+                        },
+                        "caller": {
+                            "id": caller.id,
+                            "name": caller.name,
+                            "module": caller.module.name if caller.module else None,
+                        },
+                    }
+                )
+        else:
+            # Find functions calling other functions (normal direction)
+            query = (
+                self.db.query(Caller, Callee)
+                .join(function_dependency, Caller.id == function_dependency.c.caller_id)
+                .join(Callee, function_dependency.c.callee_id == Callee.id)
+            )
+
+            if caller_name:
+                query = query.filter(Caller.name.ilike(f"%{caller_name}%"))
+
+            if callee_name:
+                query = query.filter(Callee.name.ilike(f"%{callee_name}%"))
+
+            results = []
+            for caller, callee in query.all():
+                results.append(
+                    {
+                        "caller": {
+                            "id": caller.id,
+                            "name": caller.name,
+                            "module": caller.module.name if caller.module else None,
+                        },
+                        "callee": {
+                            "id": callee.id,
+                            "name": callee.name,
+                            "module": callee.module.name if callee.module else None,
+                        },
+                    }
+                )
+
+        return results
+
+    def _match_type_usage_pattern(self, pattern: Dict) -> List[Dict]:
+        """Match patterns of type usage."""
+        type_name = pattern.get("type_name")
+        usage_in = pattern.get("usage_in")
+
+        # Find all functions using a specific type
+        if type_name and usage_in == "function":
+            # This is a simplified approach - a real implementation would need to parse function signatures
+            # and raw code to find type usages
+            results = []
+
+            # Find functions with type name in signature or raw string
+            functions = (
+                self.db.query(DBFunction)
+                .filter(
+                    or_(
+                        DBFunction.function_signature.ilike(f"%{type_name}%"),
+                        DBFunction.raw_string.ilike(f"%{type_name}%"),
+                    )
+                )
+                .all()
+            )
+
+            for function in functions:
+                results.append(
+                    {
+                        "function": {
+                            "id": function.id,
+                            "name": function.name,
+                            "module": function.module.name if function.module else None,
+                        },
+                        "type": type_name,
+                    }
+                )
+
+            return results
+
+        return []
+
+    def _match_code_structure_pattern(self, pattern: Dict) -> List[Dict]:
+        """Match patterns in code structure."""
+        structure_type = pattern.get("structure_type")
+
+        if structure_type == "nested_function":
+            # Find functions with where functions
+            functions = self.db.query(DBFunction).join(DBWhereFunction).all()
+
+            results = []
+            for function in functions:
+                results.append(
+                    {
+                        "parent_function": {
+                            "id": function.id,
+                            "name": function.name,
+                            "module": function.module.name if function.module else None,
+                        },
+                        "nested_functions": [
+                            {"id": wf.id, "name": wf.name}
+                            for wf in function.where_functions
+                        ],
+                    }
+                )
+
+            return results
+
+        return []
+
+    def execute_custom_query(self, query_str: str, params: Dict = None) -> List[Dict]:
+        """
+        Execute a custom SQL query with parameters.
+
+        Args:
+            query_str: SQL query string
+            params: Query parameters
+
+        Returns:
+            Query results
+        """
+        # WARNING: This should be used with caution and proper validation
+        # to prevent SQL injection attacks
+        results = self.db.execute(text(query_str), params or {})
+
+        output = []
+        for row in results:
+            output.append(dict(row))
+
+        return output
+
+    def find_similar_functions(
+        self, function_id: int, threshold: float = 0.7
+    ) -> List[Dict]:
+        """
+        Find functions similar to the given function based on signature and code.
+
+        Args:
+            function_id: ID of the reference function
+            threshold: Similarity threshold (0.0 to 1.0)
+
+        Returns:
+            List of similar functions with similarity scores
+        """
+        function = (
+            self.db.query(DBFunction).filter(DBFunction.id == function_id).first()
+        )
+        if not function:
+            return []
+
+        # A real implementation would use more sophisticated similarity metrics
+        # This is a simplified approach using string matching
+        signature = function.function_signature or ""
+        raw_string = function.raw_string or ""
+
+        # Find functions with similar signatures or implementations
+        similar_functions = (
+            self.db.query(DBFunction)
+            .filter(DBFunction.id != function_id)
+            .filter(
+                or_(
+                    (
+                        DBFunction.function_signature.ilike(f"%{signature[:10]}%")
+                        if len(signature) >= 10
+                        else True
+                    ),
+                    (
+                        DBFunction.raw_string.ilike(f"%{raw_string[:20]}%")
+                        if len(raw_string) >= 20
+                        else True
+                    ),
+                )
+            )
+            .all()
+        )
+
+        results = []
+        for similar in similar_functions:
+            # Calculate a simple similarity score
+            # A real implementation would use more sophisticated algorithms
+            score = 0.0
+
+            if signature and similar.function_signature:
+                # Count common words in signatures
+                sig_words = set(signature.split())
+                similar_sig_words = set(similar.function_signature.split())
+                common_sig_words = sig_words.intersection(similar_sig_words)
+                sig_similarity = len(common_sig_words) / max(len(sig_words), 1)
+                score += sig_similarity * 0.4
+
+            if raw_string and similar.raw_string:
+                # Count common lines in implementation
+                code_lines = set(raw_string.split("\n"))
+                similar_code_lines = set(similar.raw_string.split("\n"))
+                common_code_lines = code_lines.intersection(similar_code_lines)
+                code_similarity = len(common_code_lines) / max(len(code_lines), 1)
+                score += code_similarity * 0.6
+
+            if score >= threshold:
+                results.append(
+                    {
+                        "function": {
+                            "id": similar.id,
+                            "name": similar.name,
+                            "module": similar.module.name if similar.module else None,
+                        },
+                        "similarity_score": score,
+                    }
+                )
+
+        # Sort by similarity score
+        results.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return results
+
+    def find_code_patterns(self, pattern_code: str, min_matches: int = 3) -> List[Dict]:
+        """
+        Find recurring code patterns across functions.
+
+        Args:
+            pattern_code: A code snippet pattern to search for
+            min_matches: Minimum number of lines that must match
+
+        Returns:
+            List of functions containing the pattern
+        """
+        pattern_lines = pattern_code.strip().split("\n")
+        if len(pattern_lines) < min_matches:
+            return []
+
+        # Get all functions
+        functions = (
+            self.db.query(DBFunction).filter(DBFunction.raw_string.isnot(None)).all()
+        )
+        results = []
+
+        for function in functions:
+            if not function.raw_string:
+                continue
+
+            function_lines = function.raw_string.strip().split("\n")
+            if len(function_lines) < min_matches:
+                continue
+
+            # Count matches
+            matches = 0
+            matched_lines = []
+
+            for i in range(len(function_lines) - min_matches + 1):
+                # Check for a sequence of matching lines
+                sequence_matches = 0
+                current_matched_lines = []
+
+                for j in range(min(len(pattern_lines), len(function_lines) - i)):
+                    pattern_line = pattern_lines[j].strip()
+                    function_line = function_lines[i + j].strip()
+
+                    if not pattern_line or not function_line:
+                        continue
+
+                    if pattern_line in function_line or function_line in pattern_line:
+                        sequence_matches += 1
+                        current_matched_lines.append((i + j, function_line))
+
+                if sequence_matches >= min_matches:
+                    matches += 1
+                    matched_lines.extend(current_matched_lines)
+
+            if matches > 0:
+                results.append(
+                    {
+                        "function": {
+                            "id": function.id,
+                            "name": function.name,
+                            "module": function.module.name if function.module else None,
+                        },
+                        "matches": matches,
+                        "matched_lines": matched_lines,
+                    }
+                )
+
+        return results
+
+    def group_similar_functions(self, similarity_threshold: float = 0.7) -> List[Dict]:
+        """
+        Group similar functions together based on code similarity.
+
+        Args:
+            similarity_threshold: Minimum similarity score to group functions
+
+        Returns:
+            List of function groups
+        """
+        # Get all functions with raw code
+        functions = (
+            self.db.query(DBFunction).filter(DBFunction.raw_string.isnot(None)).all()
+        )
+
+        # Group similar functions
+        groups = []
+        processed_functions = set()
+
+        for i, function in enumerate(functions):
+            if function.id in processed_functions:
+                continue
+
+            group = {
+                "functions": [
+                    {
+                        "id": function.id,
+                        "name": function.name,
+                        "module": function.module.name if function.module else None,
+                    }
+                ],
+                "similarity": 1.0,
+            }
+            processed_functions.add(function.id)
+
+            for j in range(i + 1, len(functions)):
+                other = functions[j]
+                if other.id in processed_functions:
+                    continue
+
+                # Calculate similarity
+                similarity = 0.0
+
+                if function.raw_string and other.raw_string:
+                    # Count common lines
+                    func_lines = set(function.raw_string.split("\n"))
+                    other_lines = set(other.raw_string.split("\n"))
+                    common_lines = func_lines.intersection(other_lines)
+
+                    # Calculate Jaccard similarity
+                    similarity = len(common_lines) / (
+                        len(func_lines) + len(other_lines) - len(common_lines)
+                    )
+
+                if similarity >= similarity_threshold:
+                    group["functions"].append(
+                        {
+                            "id": other.id,
+                            "name": other.name,
+                            "module": other.module.name if other.module else None,
+                        }
+                    )
+                    processed_functions.add(other.id)
+
+            if len(group["functions"]) > 1:
+                # Calculate average similarity
+                group["similarity"] = similarity_threshold
+                groups.append(group)
+
+        return groups
+
+    def find_cross_module_dependencies(self) -> List[Dict]:
+        """
+        Find dependencies between modules based on function calls.
+
+        Returns:
+            List of module dependencies with call counts
+        """
+        # Query caller-callee pairs across different modules
+        module_deps = {}
+
+        # Create aliases for caller and callee functions
+        CallerFunc = aliased(DBFunction)
+        CalleeFunc = aliased(DBFunction)
+
+        # Create aliases for modules
+        CallerModule = aliased(DBModule)
+        CalleeModule = aliased(DBModule)
+
+        # Find all cross-module function calls
+        results = (
+            self.db.query(CallerModule, CalleeModule, func.count().label("calls"))
+            .join(CallerFunc, CallerModule.id == CallerFunc.module_id)
+            .join(function_dependency, CallerFunc.id == function_dependency.c.caller_id)
+            .join(CalleeFunc, function_dependency.c.callee_id == CalleeFunc.id)
+            .join(CalleeModule, CalleeFunc.module_id == CalleeModule.id)
+            .filter(CallerModule.id != CalleeModule.id)
+            .group_by(CallerModule.id, CalleeModule.id)
+            .all()
+        )
+
+        dependencies = []
+        for caller_module, callee_module, call_count in results:
+            dependencies.append(
+                {
+                    "caller_module": {
+                        "id": caller_module.id,
+                        "name": caller_module.name,
+                    },
+                    "callee_module": {
+                        "id": callee_module.id,
+                        "name": callee_module.name,
+                    },
+                    "call_count": call_count,
+                }
+            )
+
+        return dependencies
+
+    def analyze_module_coupling(self) -> Dict[str, Any]:
+        """
+        Analyze coupling between modules based on function calls and dependencies.
+
+        Returns:
+            Dictionary with coupling metrics
+        """
+        # Get cross-module dependencies
+        dependencies = self.find_cross_module_dependencies()
+
+        # Count incoming and outgoing dependencies per module
+        module_metrics = {}
+
+        # Get all modules
+        modules = self.db.query(DBModule).all()
+        for module in modules:
+            module_metrics[module.id] = {
+                "name": module.name,
+                "incoming": 0,
+                "outgoing": 0,
+                "total": 0,
+            }
+
+        # Count dependencies
+        for dep in dependencies:
+            caller_id = dep["caller_module"]["id"]
+            callee_id = dep["callee_module"]["id"]
+            calls = dep["call_count"]
+
+            if caller_id in module_metrics:
+                module_metrics[caller_id]["outgoing"] += calls
+                module_metrics[caller_id]["total"] += calls
+
+            if callee_id in module_metrics:
+                module_metrics[callee_id]["incoming"] += calls
+                module_metrics[callee_id]["total"] += calls
+
+        # Calculate coupling metrics
+        result = {
+            "module_metrics": list(module_metrics.values()),
+            "total_cross_module_calls": sum(d["call_count"] for d in dependencies),
+            "module_count": len(modules),
+            "dependency_count": len(dependencies),
+        }
+
+        # Sort modules by coupling (total dependencies)
+        result["module_metrics"].sort(key=lambda x: x["total"], reverse=True)
+
+        return result
+
+    def find_complex_functions(self, complexity_threshold: int = 10) -> List[Dict]:
+        """
+        Find complex functions based on various metrics.
+
+        Args:
+            complexity_threshold: Threshold for function complexity
+
+        Returns:
+            List of complex functions with metrics
+        """
+        results = []
+
+        # Get functions with their dependencies and code
+        functions = (
+            self.db.query(DBFunction)
+            .options(
+                joinedload(DBFunction.called_functions),
+                joinedload(DBFunction.where_functions),
+            )
+            .filter(DBFunction.raw_string.isnot(None))
+            .all()
+        )
+
+        for function in functions:
+            # Calculate simplified cyclomatic complexity based on keywords
+            complexity = 1  # Base complexity
+
+            if function.raw_string:
+                # Count decision points (simplified approach)
+                decision_keywords = [
+                    "if",
+                    "case",
+                    "of",
+                    "where",
+                    "let",
+                    "do",
+                    "->",
+                    "| ",
+                ]
+                for keyword in decision_keywords:
+                    complexity += function.raw_string.count(keyword)
+
+            # Count outgoing dependencies
+            dependency_count = len(function.called_functions)
+
+            # Count nested functions
+            nested_count = len(function.where_functions)
+
+            # Calculate total complexity score
+            complexity_score = complexity + dependency_count + nested_count
+
+            if complexity_score >= complexity_threshold:
+                results.append(
+                    {
+                        "function": {
+                            "id": function.id,
+                            "name": function.name,
+                            "module": function.module.name if function.module else None,
+                        },
+                        "metrics": {
+                            "cyclomatic_complexity": complexity,
+                            "dependency_count": dependency_count,
+                            "nested_functions": nested_count,
+                            "total_complexity": complexity_score,
+                        },
+                    }
+                )
+
+        # Sort by total complexity
+        results.sort(key=lambda x: x["metrics"]["total_complexity"], reverse=True)
+        return results

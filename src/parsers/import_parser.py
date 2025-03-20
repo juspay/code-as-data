@@ -8,7 +8,7 @@ from src.models.import_model import Import
 class ImportParser:
     """Parser for import data from dump files."""
 
-    def __init__(self, raw_code_path: str, path: str):
+    def __init__(self, raw_code_path: str):
         """
         Initialize the import parser.
 
@@ -17,7 +17,7 @@ class ImportParser:
             path: Path to the import dump files
         """
         self.raw_code_path = raw_code_path
-        self.path = path
+        self.path = raw_code_path
         self.imports: Dict[str, List[Import]] = {}
 
     def _process_import_data(

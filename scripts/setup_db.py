@@ -10,20 +10,7 @@ import argparse
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.db.connection import engine, Base
-from src.db.models import (
-    Module,
-    Function,
-    WhereFunction,
-    Import,
-    Type,
-    Constructor,
-    Field,
-    Class,
-    Instance,
-    InstanceFunction,
-    function_dependency,
-    type_dependency,
-)
+from src.db.models import *
 
 
 def setup_database(drop_tables: bool = False):

@@ -129,7 +129,7 @@ class InstanceParser:
         """
         files = list_files_recursive(self.path, pattern=".hs.instance_code.json")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_file = {
                 executor.submit(self.process_single_module, file): file
                 for file in files

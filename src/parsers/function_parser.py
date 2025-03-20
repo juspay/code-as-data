@@ -1,7 +1,11 @@
 import json
 import re
+import os
 import concurrent.futures
 from typing import Dict, List, Optional, Tuple, Any
+import time
+import multiprocessing
+import io
 
 from . import list_files_recursive, get_module_name, error_trace
 from src.models.function_model import Function
@@ -51,46 +55,110 @@ class FunctionParser:
             error_trace(e)
             print("update_nested_key", e)
 
-    def process_single_module(self, file_path: str) -> Tuple[bool, Optional[Dict]]:
+    def load_all_files(self) -> Dict:
         """
-        Process a single module file and update the internal state.
+        Load all function files in the directory using a sequential approach optimized for I/O.
 
-        Args:
-            file_path: Path to the module file
+        This approach focuses on minimizing I/O overhead and serialization costs.
 
         Returns:
-            Tuple of (success, processed data)
+            Dictionary of processed function data
         """
-        # Load function code if it exists
-        module_name = get_module_name(self.path, file_path, ".hs.json")
+        # Get all function files
+        overall_start = time.time()
+        files = list_files_recursive(self.path, pattern=".hs.json")
+        print(f"Found {len(files)} function files to process")
 
-        # Load and process the main file
-        try:
-            with open(file_path, "r") as f:
-                file_data = json.load(f)
-                # Update internal state
+        if not files:
+            print("No files found. Check the path and pattern.")
+            return {}
+
+        # Clear existing data
+        self.data = {}
+        self.module_name_path = {}
+        self.top_lvl_functions = []
+
+        # Pre-calculate module names for all files
+        module_names = {}
+        module_paths = {}
+        for file_path in files:
+            module_name = get_module_name(self.path, file_path, ".hs.json")
+            module_names[file_path] = module_name
+            module_paths[module_name] = file_path.replace(
+                (self.path + "/"), ""
+            ).replace(".json", "")
+
+        # Pre-load all code string data in a single pass
+        code_strings = {}
+        for file_path in files:
+            module_name = module_names[file_path]
+            function_code_path = file_path.replace(".hs.json", ".hs.function_code.json")
+            try:
+                with open(function_code_path, "r") as f:
+                    code_strings[module_name] = json.load(f)
+            except Exception:
+                code_strings[module_name] = {}
+
+        # Process files
+        processed_files = 0
+        start_time = time.time()
+        update_interval = max(
+            1, min(1000, len(files) // 20)
+        )  # Update progress every ~5%
+
+        # Process all files sequentially with optimized I/O
+        for file_path in files:
+            module_name = module_names[file_path]
+
+            try:
+                # Process the file
+                with open(file_path, "r") as f:
+                    file_data = json.load(f)
+
+                # Get code strings for this module
+                module_code_strings = code_strings.get(module_name, {})
+
+                # Process the data
                 local_fdep = self._process_module_data(
-                    file_path, file_data, module_name
+                    file_path, file_data, module_name, module_code_strings
                 )
 
-                self.module_name_path[module_name] = file_path.replace(
-                    (self.path + "/"), ""
-                ).replace(".json", "")
-
-                # Update or add to existing data
+                # Update data structures
                 self.data[module_name] = local_fdep
+                self.module_name_path[module_name] = module_paths[module_name]
+                self.top_lvl_functions.extend(list(local_fdep.keys()))
 
-                # Update top level functions
-                new_functions = list(local_fdep.keys())
-                self.top_lvl_functions.extend(new_functions)
+            except Exception as e:
+                print(f"Error processing file {file_path}: {e}")
 
-                return (True, self.data[module_name])
-        except Exception as e:
-            error_trace(e)
-            print(f"Error processing file {file_path}: {e}")
-            return (False, None)
+            # Update progress
+            processed_files += 1
+            if processed_files % update_interval == 0 or processed_files == len(files):
+                elapsed = time.time() - start_time
+                files_per_second = processed_files / elapsed if elapsed > 0 else 0
+                remaining = (
+                    (len(files) - processed_files) / files_per_second
+                    if files_per_second > 0
+                    else 0
+                )
 
-    def _process_module_data(self, file_path: str, obj: Dict, module_name: str) -> Dict:
+                print(
+                    f"Progress: {processed_files}/{len(files)} files processed "
+                    f"({files_per_second:.1f} files/sec, ~{remaining:.1f}s remaining)"
+                )
+
+        # Report completion
+        total_time = time.time() - overall_start
+        print(
+            f"Completed processing {len(self.data)} modules in {total_time:.2f} seconds "
+            f"({len(files)/total_time:.1f} files/sec)"
+        )
+
+        return self.data
+
+    def _process_module_data(
+        self, file_path: str, obj: Dict, module_name: str, code_string_dict: Dict
+    ) -> Dict:
         """
         Process the module data and return local fdep dictionary.
 
@@ -98,19 +166,12 @@ class FunctionParser:
             file_path: Path to the module file
             obj: Module data object
             module_name: Name of the module
+            code_string_dict: Dictionary of function code strings
 
         Returns:
             Dictionary of processed function data
         """
         local_fdep = {}
-        function_code_path = file_path.replace(".hs.json", ".hs.function_code.json")
-
-        try:
-            with open(function_code_path) as code_string:
-                self.code_string_dict[module_name] = json.load(code_string)
-        except Exception as e:
-            error_trace(e)
-            print(f"Error loading function code from {function_code_path}: {e}")
 
         for functionsName, functionData in obj.items():
             if not "::" in functionsName:
@@ -129,25 +190,16 @@ class FunctionParser:
                         "functions_called": [],
                     }
 
-                    if (
-                        self.code_string_dict.get(module_name, {}).get(fName)
-                        is not None
-                    ):
-                        local_fdep[fName]["stringified_code"] = (
-                            self.code_string_dict[module_name]
-                            .get(fName, {})
-                            .get("parser_stringified_code", "")
-                        )
-                        local_fdep[fName]["line_number_start"] = (
-                            self.code_string_dict[module_name]
-                            .get(fName, {})
-                            .get("line_number", [-1, -1])[0]
-                        )
-                        local_fdep[fName]["line_number_end"] = (
-                            self.code_string_dict[module_name]
-                            .get(fName, {})
-                            .get("line_number", [-1, -1])[1]
-                        )
+                    if code_string_dict.get(fName) is not None:
+                        local_fdep[fName]["stringified_code"] = code_string_dict.get(
+                            fName, {}
+                        ).get("parser_stringified_code", "")
+                        local_fdep[fName]["line_number_start"] = code_string_dict.get(
+                            fName, {}
+                        ).get("line_number", [-1, -1])[0]
+                        local_fdep[fName]["line_number_end"] = code_string_dict.get(
+                            fName, {}
+                        ).get("line_number", [-1, -1])[1]
 
                     for i in functionData:
                         if i and i.get("typeSignature") is not None:
@@ -228,29 +280,6 @@ class FunctionParser:
                 unique_elements.values()
             )
 
-    def load_all_files(self) -> Dict:
-        """
-        Load all function files in the directory.
-
-        Returns:
-            Dictionary of processed function data
-        """
-        files = list_files_recursive(self.path, pattern=".hs.json")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_file = {
-                executor.submit(self.process_single_module, file): file
-                for file in files
-            }
-            for future in concurrent.futures.as_completed(future_to_file):
-                file = future_to_file[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Error reading {file}: {e}")
-
-        return self.data
-
     def get_functions(self) -> List[Function]:
         """
         Convert processed data to Function objects.
@@ -284,7 +313,7 @@ class FunctionParser:
                                 else -1
                             )
                             line_number_end = line_number_start
-                        except Exception as e:
+                        except Exception:
                             # Try pattern like (70,1)-(71,20)
                             pattern = r".*:(\d+),(\d+)-\((\d+),(\d+)\)"
                             match = re.match(pattern, function_body["src_loc"])

@@ -63,7 +63,7 @@ def get_module_name(base_dir_path, path, to_replace=""):
             break
     # path = Path(path).stem
     module_name = replace_all(path, [("/", ".")])
-    print(module_name, path)
+    # print(module_name, path)
     return module_name
 
 

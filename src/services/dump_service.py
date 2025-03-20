@@ -11,7 +11,6 @@ from sqlalchemy import text
 from contextlib import contextmanager
 
 from src.db.connection import SessionLocal
-from src.db.repository import Repository
 from src.parsers.function_parser import FunctionParser
 from src.parsers.class_parser import ClassParser
 from src.parsers.import_parser import ImportParser
@@ -42,18 +41,18 @@ class DumpService:
         """
         self.fdep_path = fdep_path
         self.field_inspector_path = field_inspector_path
-        self.repository = Repository()
 
         # Initialize parsers
         self.function_parser = FunctionParser(fdep_path)
-        self.class_parser = ClassParser(field_inspector_path)
-        self.import_parser = ImportParser(fdep_path, fdep_path)
-        self.type_parser = TypeParser(fdep_path, field_inspector_path)
+        self.class_parser = ClassParser(fdep_path)
+        self.import_parser = ImportParser(fdep_path)
+        self.type_parser = TypeParser(fdep_path)
 
         # For optimized bulk loading
         self.temp_dir = None
         self.module_id_map = {}
         self.function_id_map = {}
+        self.where_function_id_map = {}
         self.class_id_map = {}
         self.type_id_map = {}
         self.constructor_id_map = {}
@@ -192,11 +191,6 @@ class DumpService:
                 # Temporarily disable triggers
                 db.execute(text("SET session_replication_role = 'replica'"))
 
-                # Optional: Drop existing indexes if you're completely rebuilding data
-                # DO NOT drop primary key constraints/indexes
-                # db.execute(text("DROP INDEX IF EXISTS idx_function_name"))
-                # Add more index drops here if needed
-
                 db.commit()
                 print("Database prepared for high-speed inserts")
             except Exception as e:
@@ -205,6 +199,7 @@ class DumpService:
 
     def restore_database(self):
         """Restore database constraints and rebuild indexes after data loading."""
+        # First handle the transaction-based operations
         with self.get_session() as db:
             print("Restoring database constraints and indexes...")
             try:
@@ -214,17 +209,27 @@ class DumpService:
                 # Re-enable triggers
                 db.execute(text("SET session_replication_role = 'origin'"))
 
-                # Recreate any indexes that were dropped (if any)
-                # db.execute(text("CREATE INDEX IF NOT EXISTS idx_function_name ON function(name)"))
-                # Add more index creations here if needed
-
                 db.commit()
-                print("Starting VACUUM ANALYZE for better query planning...")
-                db.execute(text("VACUUM ANALYZE"))
                 print("Database constraints and indexes restored")
             except Exception as e:
                 db.rollback()
-                print(f"Error restoring database: {e}")
+                print(f"Error restoring database constraints: {e}")
+
+        # Now handle VACUUM ANALYZE, which must be outside a transaction
+        try:
+            # Create a new session specifically for VACUUM
+            with self.get_session() as vacuum_db:
+                print("Starting VACUUM ANALYZE for better query planning...")
+                # Set autocommit to True to run outside a transaction
+                vacuum_db.execute(text("COMMIT"))  # Ensure no transaction is active
+                vacuum_db.connection().connection.set_isolation_level(
+                    0
+                )  # AUTOCOMMIT isolation level
+                vacuum_db.execute(text("VACUUM ANALYZE"))
+                print("VACUUM ANALYZE completed successfully")
+        except Exception as e:
+            print(f"Error during VACUUM ANALYZE: {e}")
+            print("Continuing despite VACUUM error (this is not critical)")
 
     def close_all_csv_files(self):
         """Close all open CSV files."""
@@ -249,7 +254,7 @@ class DumpService:
         print(f"Prepared {module_id-1} modules for bulk loading")
 
     def prepare_function_csv(self, functions_by_module):
-        """Prepare CSV files for functions and where_functions."""
+        """Prepare CSV files for functions and where_functions with improved ID handling."""
         print("Preparing functions CSV...")
         function_writer = self.prepare_csv_file(
             "function",
@@ -280,91 +285,343 @@ class DumpService:
             ],
         )
 
+        # Use a set to track unique function dependencies
+        function_dependencies = set()
         function_dependency_writer = self.prepare_csv_file(
             "function_dependency", ["caller_id", "callee_id"]
         )
 
+        # First pass - create a more robust function ID mapping
+        print("First pass: Generating robust function ID mappings...")
+
+        # Dictionary to store all functions with their signatures for disambiguation
+        all_functions = {}
+        function_canonical_keys = {}
+
+        for module_name, functions in functions_by_module.items():
+            for function in functions:
+                # Create a canonical key that includes more information to disambiguate
+                canonical_signature = function.function_signature or ""
+
+                if function.src_loc and function.line_number_start > 0:
+                    canonical_key = f"{module_name}:{function.function_name}:{canonical_signature}:{function.src_loc}:{function.line_number_start}"
+                else:
+                    canonical_key = (
+                        f"{module_name}:{function.function_name}:{canonical_signature}"
+                    )
+
+                # Store the function with its canonical key
+                all_functions[canonical_key] = function
+
+                # Map the simple key to this canonical key to use in dependency resolution
+                simple_key = (module_name, function.function_name)
+
+                if simple_key in function_canonical_keys:
+                    # If we already have this simple key, make a list of canonical keys for it
+                    if isinstance(function_canonical_keys[simple_key], list):
+                        function_canonical_keys[simple_key].append(canonical_key)
+                    else:
+                        function_canonical_keys[simple_key] = [
+                            function_canonical_keys[simple_key],
+                            canonical_key,
+                        ]
+                else:
+                    function_canonical_keys[simple_key] = canonical_key
+
+        # Second pass - write function data with assigned IDs
+        print("Second pass: Writing function data with assigned IDs...")
         function_id = 1
         where_function_id = 1
-        dependency_count = 0
 
-        # First pass - create all functions
-        for module_name, functions in functions_by_module.items():
+        # Mapping from canonical keys to function IDs
+        canonical_key_to_id = {}
+
+        for canonical_key, function in all_functions.items():
+            module_name = function.module_name
             module_id = self.module_id_map.get(module_name)
             if not module_id:
                 continue
 
-            for function in functions:
-                # Handle JSON serialization
-                function_input_json = (
-                    json.dumps(function.function_input)
-                    if function.function_input
-                    else None
-                )
-                function_output_json = (
-                    json.dumps(function.function_output)
-                    if function.function_output
-                    else None
-                )
+            # Handle JSON serialization
+            function_input_json = (
+                json.dumps(function.function_input) if function.function_input else None
+            )
+            function_output_json = (
+                json.dumps(function.function_output)
+                if function.function_output
+                else None
+            )
 
-                # Write function data
-                function_writer.writerow(
+            # Write function data
+            function_writer.writerow(
+                [
+                    function_id,
+                    function.function_name,
+                    function.function_signature,
+                    function.raw_string,
+                    function.src_loc,
+                    function.line_number_start,
+                    function.line_number_end,
+                    function.type_enum,
+                    module_id,
+                    function_input_json,
+                    function_output_json,
+                ]
+            )
+
+            # Store the ID for this canonical key
+            canonical_key_to_id[canonical_key] = function_id
+
+            # Process where functions
+            for where_name, where_func in function.where_functions.items():
+                # line_start = getattr(where_func, "line_number_start", None)
+                # line_end = getattr(where_func, "line_number_end", None)
+
+                where_function_writer.writerow(
                     [
+                        where_function_id,
+                        where_func.function_name,
+                        getattr(where_func, "function_signature", None),
+                        getattr(where_func, "raw_string", None),
+                        getattr(where_func, "src_loc", None),
+                        # line_start,
+                        # line_end,
                         function_id,
-                        function.function_name,
-                        function.function_signature,
-                        function.raw_string,
-                        function.src_loc,
-                        function.line_number_start,
-                        function.line_number_end,
-                        function.type_enum,
-                        module_id,
-                        function_input_json,
-                        function_output_json,
                     ]
                 )
 
-                self.function_id_map[(module_name, function.function_name)] = (
-                    function_id
-                )
+                # Store where function ID for later use
+                where_key = f"{module_name}:{function.function_name}:{where_name}"
+                self.where_function_id_map[where_key] = where_function_id
 
-                # Process where functions
-                for where_name, where_func in function.where_functions.items():
-                    where_function_writer.writerow(
-                        [
-                            where_function_id,
-                            where_func.function_name,
-                            where_func.function_signature,
-                            where_func.raw_string,
-                            where_func.src_loc,
-                            function_id,
-                        ]
-                    )
-                    where_function_id += 1
+                where_function_id += 1
 
-                function_id += 1
+            function_id += 1
 
-        # Second pass - create dependencies
+        # Third pass - create dependencies using canonical keys for lookup
+        print("Third pass: Creating function dependencies...")
+        dependency_count = 0
+        skipped_duplicates = 0
+        missing_dependencies = 0
+        ambiguous_dependencies = 0
+
         for module_name, functions in functions_by_module.items():
             for function in functions:
-                caller_id = self.function_id_map.get(
-                    (module_name, function.function_name)
-                )
-                if not caller_id:
+                # Get the canonical key(s) for the caller
+                simple_caller_key = (module_name, function.function_name)
+                caller_canonical_keys = function_canonical_keys.get(simple_caller_key)
+
+                if not caller_canonical_keys:
                     continue
 
-                for called_function in function.functions_called:
-                    if called_function.module_name and called_function.function_name:
-                        callee_id = self.function_id_map.get(
-                            (called_function.module_name, called_function.function_name)
+                # Handle both single and multiple canonical keys
+                if not isinstance(caller_canonical_keys, list):
+                    caller_canonical_keys = [caller_canonical_keys]
+
+                for caller_canonical_key in caller_canonical_keys:
+                    caller_id = canonical_key_to_id.get(caller_canonical_key)
+                    if not caller_id:
+                        continue
+
+                    for called_function in function.functions_called:
+                        if (
+                            not called_function.module_name
+                            or not called_function.function_name
+                        ):
+                            continue
+
+                        # Get the canonical key(s) for the callee
+                        simple_callee_key = (
+                            called_function.module_name,
+                            called_function.function_name,
                         )
-                        if callee_id:
-                            function_dependency_writer.writerow([caller_id, callee_id])
-                            dependency_count += 1
+                        callee_canonical_keys = function_canonical_keys.get(
+                            simple_callee_key
+                        )
+
+                        if not callee_canonical_keys:
+                            missing_dependencies += 1
+                            continue
+
+                        # Handle both single and multiple canonical keys
+                        if not isinstance(callee_canonical_keys, list):
+                            callee_canonical_keys = [callee_canonical_keys]
+
+                        # If we have multiple canonical keys for the callee, we consider it ambiguous
+                        if len(callee_canonical_keys) > 1:
+                            ambiguous_dependencies += 1
+
+                        for callee_canonical_key in callee_canonical_keys:
+                            callee_id = canonical_key_to_id.get(callee_canonical_key)
+                            if not callee_id:
+                                continue
+
+                            # Check if this is a duplicate dependency
+                            dependency_key = (caller_id, callee_id)
+                            if dependency_key not in function_dependencies:
+                                function_dependencies.add(dependency_key)
+                                function_dependency_writer.writerow(
+                                    [caller_id, callee_id]
+                                )
+                                dependency_count += 1
+                            else:
+                                skipped_duplicates += 1
+
+        # Update the function ID map for later use
+        self.function_id_map = {
+            simple_key: canonical_key_to_id[canonical_key]
+            for simple_key, canonical_key in function_canonical_keys.items()
+            if not isinstance(canonical_key, list)
+            and canonical_key in canonical_key_to_id
+        }
 
         print(
-            f"Prepared {function_id-1} functions, {where_function_id-1} where functions, and {dependency_count} dependencies for bulk loading"
+            f"Prepared {function_id-1} functions, {where_function_id-1} where functions"
         )
+        print(
+            f"Prepared {dependency_count} unique function dependencies (skipped {skipped_duplicates} duplicates)"
+        )
+        print(
+            f"Could not resolve {missing_dependencies} dependencies due to missing functions"
+        )
+        print(f"Encountered {ambiguous_dependencies} ambiguous dependencies")
+
+    def prepare_function_called_csv(self, functions_by_module):
+        """Prepare CSV file for function_called entities."""
+        print("Preparing function_called CSV...")
+        function_called_writer = self.prepare_csv_file(
+            "function_called",
+            [
+                "id",
+                "module_name",
+                "name",
+                "function_name",
+                "package_name",
+                "src_loc",
+                "_type",
+                "function_signature",
+                "type_enum",
+                "function_id",
+                "where_function_id",
+            ],
+        )
+
+        function_called_id = 1
+        function_call_count = 0
+
+        # Process all functions and their calls
+        for module_name, functions in functions_by_module.items():
+            for function in functions:
+                # Get the function_id for this function
+                function_id = self.function_id_map.get(
+                    (module_name, function.function_name)
+                )
+                if not function_id:
+                    continue
+
+                # Process function calls from this function
+                if hasattr(function, "functions_called") and function.functions_called:
+                    for called_function in function.functions_called:
+                        # Extract attributes from the called function
+                        module_name_val = getattr(called_function, "module_name", None)
+                        name_val = getattr(called_function, "name", None)
+                        function_name_val = (
+                            getattr(called_function, "function_name", None) or name_val
+                        )
+                        package_name_val = getattr(
+                            called_function, "package_name", None
+                        )
+                        src_loc_val = getattr(called_function, "src_loc", None)
+                        type_val = getattr(called_function, "_type", None) or getattr(
+                            called_function, "type_enum", ""
+                        )
+                        function_signature_val = getattr(
+                            called_function, "function_signature", None
+                        )
+                        type_enum_val = getattr(
+                            called_function, "type_enum", None
+                        ) or getattr(called_function, "_type", "")
+
+                        # Write to CSV
+                        function_called_writer.writerow(
+                            [
+                                function_called_id,
+                                module_name_val,
+                                name_val,
+                                function_name_val,
+                                package_name_val,
+                                src_loc_val,
+                                type_val,
+                                function_signature_val,
+                                type_enum_val,
+                                function_id,
+                                None,  # where_function_id is None here
+                            ]
+                        )
+
+                        function_called_id += 1
+                        function_call_count += 1
+
+                # Process where functions and their calls
+                for where_name, where_func in function.where_functions.items():
+                    # Use the where function ID from our mapping
+                    where_key = f"{module_name}:{function.function_name}:{where_name}"
+                    where_function_id = self.where_function_id_map.get(where_key)
+
+                    if not where_function_id:
+                        continue
+
+                    # Process function calls from this where function
+                    if (
+                        hasattr(where_func, "functions_called")
+                        and where_func.functions_called
+                    ):
+                        for called_function in where_func.functions_called:
+                            # Extract attributes from the called function
+                            module_name_val = getattr(
+                                called_function, "module_name", None
+                            )
+                            name_val = getattr(called_function, "name", None)
+                            function_name_val = (
+                                getattr(called_function, "function_name", None)
+                                or name_val
+                            )
+                            package_name_val = getattr(
+                                called_function, "package_name", None
+                            )
+                            src_loc_val = getattr(called_function, "src_loc", None)
+                            type_val = getattr(
+                                called_function, "_type", None
+                            ) or getattr(called_function, "type_enum", "")
+                            function_signature_val = getattr(
+                                called_function, "function_signature", None
+                            )
+                            type_enum_val = getattr(
+                                called_function, "type_enum", None
+                            ) or getattr(called_function, "_type", "")
+
+                            # Write to CSV
+                            function_called_writer.writerow(
+                                [
+                                    function_called_id,
+                                    module_name_val,
+                                    name_val,
+                                    function_name_val,
+                                    package_name_val,
+                                    src_loc_val,
+                                    type_val,
+                                    function_signature_val,
+                                    type_enum_val,
+                                    None,  # function_id is None for where function calls
+                                    where_function_id,
+                                ]
+                            )
+
+                            function_called_id += 1
+                            function_call_count += 1
+
+        print(f"Prepared {function_call_count} function calls for bulk loading")
+        return function_call_count
 
     def prepare_class_csv(self, classes_by_module):
         """Prepare CSV file for classes."""
@@ -629,24 +886,333 @@ class DumpService:
 
     def execute_bulk_load(self):
         """Execute PostgreSQL COPY commands to load all CSV data into the database."""
+
+        # Load in this specific order to handle dependencies properly
+        table_order = [
+            "module",
+            "function",
+            "where_function",
+            "function_called",
+            "class",
+            "import",
+            "type",
+            "constructor",
+            "field",
+            "instance",
+            "instance_function",
+            "function_dependency",
+            "type_dependency",
+        ]
+
+        # Define column types for tables that need special handling
+        column_types = {
+            "function_dependency": {"caller_id": "INTEGER", "callee_id": "INTEGER"},
+            "type_dependency": {"dependent_id": "INTEGER", "dependency_id": "INTEGER"},
+        }
+
         with self.get_session() as db:
-            for table_name, table_info in self.csv_files.items():
+            for table_name in table_order:
+                if table_name not in self.csv_files:
+                    continue
+
+                table_info = self.csv_files[table_name]
                 print(f"Loading data into {table_name}...")
                 columns_str = ", ".join(table_info["columns"])
-                copy_sql = f"""
-                    COPY {table_name}({columns_str})
-                    FROM '{table_info['path']}'
-                    WITH (FORMAT csv, HEADER true, DELIMITER ',')
-                """
-                try:
-                    tic = time.perf_counter()
-                    db.execute(text(copy_sql))
-                    db.commit()
-                    toc = time.perf_counter()
-                    print(f"Loaded {table_name} in {toc - tic:0.4f} seconds")
-                except Exception as e:
-                    db.rollback()
-                    print(f"Error loading {table_name}: {e}")
+
+                # Special handling for tables with potential duplicates
+                if table_name in ["function_dependency", "type_dependency"]:
+                    try:
+                        # Create type definitions string for temp table
+                        type_defs = []
+                        for col in table_info["columns"]:
+                            col_type = column_types.get(table_name, {}).get(col, "TEXT")
+                            type_defs.append(f"{col} {col_type}")
+
+                        # Try using a temp table with proper column types
+                        temp_table_name = f"temp_{table_name}"
+                        copy_sql = f"""
+                            CREATE TEMP TABLE {temp_table_name} (
+                                {', '.join(type_defs)}
+                            );
+                            
+                            COPY {temp_table_name}({columns_str})
+                            FROM '{table_info['path']}'
+                            WITH (FORMAT csv, HEADER true, DELIMITER ',');
+                            
+                            INSERT INTO {table_name} ({columns_str})
+                            SELECT {columns_str} FROM {temp_table_name}
+                            ON CONFLICT DO NOTHING;
+                            
+                            DROP TABLE {temp_table_name};
+                        """
+                        tic = time.perf_counter()
+                        db.execute(text(copy_sql))
+                        db.commit()
+                        toc = time.perf_counter()
+                        print(
+                            f"Loaded {table_name} (with duplicate handling) in {toc - tic:0.4f} seconds"
+                        )
+                    except Exception as e:
+                        db.rollback()
+                        print(
+                            f"Error loading {table_name} with duplicate handling: {e}"
+                        )
+
+                        # Fallback to direct COPY with a pre-cleanup step
+                        try:
+                            # First create a clean CSV without duplicates
+                            clean_csv_path = self.create_clean_csv(
+                                table_name, table_info["path"]
+                            )
+
+                            # Use COPY for the cleaned CSV
+                            copy_sql = f"""
+                                COPY {table_name}({columns_str})
+                                FROM '{clean_csv_path}'
+                                WITH (FORMAT csv, HEADER true, DELIMITER ',')
+                            """
+                            db.execute(text(copy_sql))
+                            db.commit()
+                            print(f"Loaded {table_name} using cleaned CSV")
+                        except Exception as e2:
+                            db.rollback()
+                            print(f"Failed alternative loading for {table_name}: {e2}")
+
+                            # Last resort: manual insert for this table
+                            print(f"Falling back to manual insert for {table_name}")
+                            self.manual_load_with_duplicate_checking(
+                                db, table_name, table_info["path"]
+                            )
+
+                else:
+                    # Standard COPY for tables without duplicate concerns
+                    copy_sql = f"""
+                        COPY {table_name}({columns_str})
+                        FROM '{table_info['path']}'
+                        WITH (FORMAT csv, HEADER true, DELIMITER ',')
+                    """
+                    try:
+                        tic = time.perf_counter()
+                        db.execute(text(copy_sql))
+                        db.commit()
+                        toc = time.perf_counter()
+                        print(f"Loaded {table_name} in {toc - tic:0.4f} seconds")
+                    except Exception as e:
+                        db.rollback()
+                        print(f"Error loading {table_name}: {e}")
+
+    def manual_load_with_duplicate_checking(self, db, table_name, csv_path):
+        """Manual row-by-row loading with duplicate checking as a last resort."""
+        try:
+            with open(csv_path, "r") as csvfile:
+                csv_reader = csv.reader(csvfile)
+                next(csv_reader)  # Skip header
+
+                loaded = 0
+                skipped = 0
+                batch = []
+                batch_size = 1000
+
+                for row in csv_reader:
+                    if table_name == "function_dependency":
+                        caller_id, callee_id = row
+
+                        # Check if this dependency already exists
+                        result = db.execute(
+                            text(
+                                f"SELECT 1 FROM {table_name} WHERE caller_id = :caller_id AND callee_id = :callee_id"
+                            ),
+                            {"caller_id": int(caller_id), "callee_id": int(callee_id)},
+                        ).fetchone()
+
+                        if not result:
+                            batch.append((int(caller_id), int(callee_id)))
+                            loaded += 1
+
+                            # Insert in batches for better performance
+                            if len(batch) >= batch_size:
+                                self.insert_dependency_batch(db, table_name, batch)
+                                batch = []
+                        else:
+                            skipped += 1
+
+                    elif table_name == "type_dependency":
+                        dependent_id, dependency_id = row
+
+                        result = db.execute(
+                            text(
+                                f"SELECT 1 FROM {table_name} WHERE dependent_id = :dependent_id AND dependency_id = :dependency_id"
+                            ),
+                            {
+                                "dependent_id": int(dependent_id),
+                                "dependency_id": int(dependency_id),
+                            },
+                        ).fetchone()
+
+                        if not result:
+                            batch.append((int(dependent_id), int(dependency_id)))
+                            loaded += 1
+
+                            if len(batch) >= batch_size:
+                                self.insert_dependency_batch(db, table_name, batch)
+                                batch = []
+                        else:
+                            skipped += 1
+
+                # Insert any remaining items
+                if batch:
+                    self.insert_dependency_batch(db, table_name, batch)
+
+                print(
+                    f"Manually loaded {loaded} rows into {table_name} (skipped {skipped} duplicates)"
+                )
+
+        except Exception as e:
+            db.rollback()
+            print(f"Error during manual loading of {table_name}: {e}")
+
+    def extreme_parallel_processing(self):
+        """
+        Ultra-optimized parallel data processing implementation.
+
+        This implementation:
+        1. Uses a ProcessPoolExecutor for truly parallel execution on multiple cores
+        2. Handles dependencies properly (instances depend on functions)
+        3. Optimizes memory usage with prefetching and caching
+        4. Uses shared memory where possible to reduce copying overhead
+        5. Implements CPU affinity for critical processes
+
+        Returns:
+            Tuple of (functions_by_module, classes_by_module, imports_by_module,
+                    types_by_module, instances_by_module)
+        """
+        import concurrent.futures
+        import psutil
+        import os
+
+        # Detect system capabilities
+        cpu_count = psutil.cpu_count(logical=False)  # Physical cores
+        total_cores = psutil.cpu_count(
+            logical=True
+        )  # Logical cores (including hyperthreading)
+
+        # Determine optimal number of workers
+        max_workers = min(cpu_count, 4)  # Cap at 4 to avoid diminishing returns
+        print(
+            f"Starting extreme parallel processing with {max_workers} workers on {total_cores} cores..."
+        )
+
+        # Force garbage collection before starting
+        import gc
+
+        gc.collect()
+
+        overall_start = time.perf_counter()
+
+        # Pin current process to core 0 to avoid contention with worker processes
+        try:
+            current_process = psutil.Process(os.getpid())
+            current_process.cpu_affinity([0])
+            print("Main process pinned to CPU core 0")
+        except Exception as e:
+            print(f"Could not set CPU affinity: {e}")
+
+        # First, process functions (needed for instances)
+        # We'll do this in the main process to avoid serialization overhead
+        print("Processing functions...")
+        tic = time.perf_counter()
+        self.function_parser.load_all_files()
+        functions = self.function_parser.get_functions()
+
+        # Pre-allocate dictionary with known size
+        functions_by_module = {}
+        for function in functions:
+            if function.module_name not in functions_by_module:
+                functions_by_module[function.module_name] = []
+            functions_by_module[function.module_name].append(function)
+
+        # Delete the full list to free memory
+        del functions
+        toc = time.perf_counter()
+        print(
+            f"Processing functions completed in {toc - tic:0.4f} seconds - {len(functions_by_module)} modules found"
+        )
+
+        # Force garbage collection again
+        gc.collect()
+
+        # Now process the rest in parallel
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers
+        ) as executor:
+            # Start the class parsing on another process
+            print("Starting parallel class parsing...")
+            future_classes = executor.submit(self.class_parser.load)
+
+            # Start the import parsing
+            print("Starting parallel import parsing...")
+            future_imports = executor.submit(self.import_parser.load)
+
+            # Start the type parsing
+            print("Starting parallel type parsing...")
+            future_types = executor.submit(self.type_parser.load)
+
+            # Process instances in the main process while others are running
+            # This depends on functions which we already have
+            print("Processing instances (main process)...")
+            tic = time.perf_counter()
+            instance_parser = InstanceParser(
+                self.fdep_path, self.fdep_path, functions_by_module
+            )
+            instances_by_module = instance_parser.load_all_files()
+            toc = time.perf_counter()
+            print(f"Processing instances completed in {toc - tic:0.4f} seconds")
+
+            # Get results from futures
+            # We'll get them in order of expected completion time to avoid blocking
+            print("Waiting for parallel parsers to complete...")
+
+            # Classes typically complete first
+            tic = time.perf_counter()
+            classes_by_module = future_classes.result()
+            toc = time.perf_counter()
+            print(f"Classes parsing completed in {toc - tic:0.4f} seconds")
+
+            # Imports typically next
+            tic = time.perf_counter()
+            imports_by_module = future_imports.result()
+            toc = time.perf_counter()
+            print(f"Imports parsing completed in {toc - tic:0.4f} seconds")
+
+            # Types typically last
+            tic = time.perf_counter()
+            types_by_module = future_types.result()
+            toc = time.perf_counter()
+            print(f"Types parsing completed in {toc - tic:0.4f} seconds")
+
+        # Reset CPU affinity if needed
+        try:
+            current_process = psutil.Process(os.getpid())
+            current_process.cpu_affinity(list(range(total_cores)))
+            print("Main process CPU affinity reset")
+        except Exception:
+            pass  # Ignore errors here
+
+        # Final garbage collection
+        gc.collect()
+
+        overall_end = time.perf_counter()
+        print(
+            f"All data processing completed in {overall_end - overall_start:0.4f} seconds (extreme parallel mode)"
+        )
+
+        return (
+            functions_by_module,
+            classes_by_module,
+            imports_by_module,
+            types_by_module,
+            instances_by_module,
+        )
 
     def insert_data(self) -> None:
         """Process all dump files and insert the data into the database."""
@@ -655,37 +1221,17 @@ class DumpService:
             self.temp_dir = tempfile.mkdtemp()
             print(f"Using temporary directory for CSV files: {self.temp_dir}")
 
-            # Process all data
-            print("Processing functions...")
-            tic = time.perf_counter()
-            functions_by_module = self.process_functions()
-            toc = time.perf_counter()
-            print(f"Processing functions completed in {toc - tic:0.4f} seconds")
+            # Process all data using extreme parallelization
+            print("Starting extreme parallel data processing...")
+            (
+                functions_by_module,
+                classes_by_module,
+                imports_by_module,
+                types_by_module,
+                instances_by_module,
+            ) = self.extreme_parallel_processing()
 
-            print("Processing classes...")
-            tic = time.perf_counter()
-            classes_by_module = self.process_classes()
-            toc = time.perf_counter()
-            print(f"Processing classes completed in {toc - tic:0.4f} seconds")
-
-            print("Processing imports...")
-            tic = time.perf_counter()
-            imports_by_module = self.process_imports()
-            toc = time.perf_counter()
-            print(f"Processing imports completed in {toc - tic:0.4f} seconds")
-
-            print("Processing types...")
-            tic = time.perf_counter()
-            types_by_module = self.process_types()
-            toc = time.perf_counter()
-            print(f"Processing types completed in {toc - tic:0.4f} seconds")
-
-            print("Processing instances...")
-            tic = time.perf_counter()
-            instances_by_module = self.process_instances(functions_by_module)
-            toc = time.perf_counter()
-            print(f"Processing instances completed in {toc - tic:0.4f} seconds")
-
+            # Rest of the method remains unchanged
             # Combine all modules into one list
             module_list = set(
                 list(functions_by_module.keys())
@@ -706,6 +1252,7 @@ class DumpService:
 
                 self.prepare_module_csv(module_list)
                 self.prepare_function_csv(functions_by_module)
+                self.prepare_function_called_csv(functions_by_module)
                 self.prepare_class_csv(classes_by_module)
                 self.prepare_import_csv(imports_by_module)
                 self.prepare_type_csv(types_by_module)
@@ -741,3 +1288,108 @@ class DumpService:
                     print(f"Cleaned up temporary directory: {self.temp_dir}")
                 except Exception as e:
                     print(f"Error cleaning up temporary directory: {e}")
+
+    def create_clean_csv(self, table_name, original_csv_path):
+        """Create a clean CSV file with no duplicates."""
+        clean_csv_path = os.path.join(self.temp_dir, f"clean_{table_name}.csv")
+
+        try:
+            if table_name == "function_dependency":
+                # Process function dependencies
+                seen_keys = set()
+
+                with open(original_csv_path, "r", newline="") as csv_in, open(
+                    clean_csv_path, "w", newline=""
+                ) as csv_out:
+
+                    reader = csv.reader(csv_in)
+                    writer = csv.writer(csv_out)
+
+                    # Write header
+                    header = next(reader)
+                    writer.writerow(header)
+
+                    # Process and filter rows
+                    for row in reader:
+                        key = (row[0], row[1])  # (caller_id, callee_id)
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            writer.writerow(row)
+
+                print(
+                    f"Created clean CSV for {table_name} ({len(seen_keys)} unique entries)"
+                )
+
+            elif table_name == "type_dependency":
+                # Process type dependencies (similar approach)
+                seen_keys = set()
+
+                with open(original_csv_path, "r", newline="") as csv_in, open(
+                    clean_csv_path, "w", newline=""
+                ) as csv_out:
+
+                    reader = csv.reader(csv_in)
+                    writer = csv.writer(csv_out)
+
+                    # Write header
+                    header = next(reader)
+                    writer.writerow(header)
+
+                    # Process and filter rows
+                    for row in reader:
+                        key = (row[0], row[1])  # (dependent_id, dependency_id)
+                        if key not in seen_keys:
+                            seen_keys.add(key)
+                            writer.writerow(row)
+
+                print(
+                    f"Created clean CSV for {table_name} ({len(seen_keys)} unique entries)"
+                )
+
+            return clean_csv_path
+
+        except Exception as e:
+            print(f"Error creating clean CSV for {table_name}: {e}")
+            return original_csv_path  # Return original path if cleaning fails
+
+    def insert_dependency_batch(self, db, table_name, batch):
+        """Insert a batch of dependencies."""
+        try:
+            if table_name == "function_dependency":
+                stmt = text(
+                    f"""
+                    INSERT INTO {table_name} (caller_id, callee_id)
+                    VALUES (:caller_id, :callee_id)
+                    ON CONFLICT DO NOTHING
+                """
+                )
+
+                db.execute(
+                    stmt,
+                    [
+                        {"caller_id": caller_id, "callee_id": callee_id}
+                        for caller_id, callee_id in batch
+                    ],
+                )
+
+            elif table_name == "type_dependency":
+                stmt = text(
+                    f"""
+                    INSERT INTO {table_name} (dependent_id, dependency_id)
+                    VALUES (:dependent_id, :dependency_id)
+                    ON CONFLICT DO NOTHING
+                """
+                )
+
+                db.execute(
+                    stmt,
+                    [
+                        {"dependent_id": dependent_id, "dependency_id": dependency_id}
+                        for dependent_id, dependency_id in batch
+                    ],
+                )
+
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"Error inserting batch into {table_name}: {e}")

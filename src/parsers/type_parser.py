@@ -15,7 +15,7 @@ from src.models.type_model import (
 class TypeParser:
     """Parser for type data from dump files."""
 
-    def __init__(self, raw_code_path: str, json_path: str):
+    def __init__(self, raw_code_path: str):
         """
         Initialize the type parser.
 
@@ -24,7 +24,7 @@ class TypeParser:
             json_path: Path to the type dump files
         """
         self.raw_code_path = raw_code_path
-        self.json_path = json_path
+        self.json_path = raw_code_path
         self.typesPerModule: Dict[str, List[Type]] = {}
         self.raw_code_cache: Dict[str, Dict[str, Dict[str, str]]] = {}
 

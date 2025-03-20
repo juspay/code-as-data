@@ -73,7 +73,9 @@ class Function(BaseModel):
         if "functions_called" in data:
             data["functions_called"] = [
                 FunctionCalled(
-                    module_name=i.get("module_name"),
+                    module_name=(
+                        i.get("module_name") if i.get("_type") != "OverLit" else "_lit"
+                    ),
                     name=i.get("name"),
                     package_name=i.get("package_name"),
                     src_loc=i.get("src_loc"),

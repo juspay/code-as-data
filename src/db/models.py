@@ -35,6 +35,39 @@ class Module(Base):
     instances = relationship("Instance", back_populates="module")
 
 
+class FunctionCalled(Base):
+    """Table representing called functions."""
+
+    __tablename__ = "function_called"
+
+    id = Column(Integer, primary_key=True, index=True)
+    module_name = Column(String(255))
+    name = Column(Text)
+    package_name = Column(String(255))
+    src_loc = Column(String(512))
+    _type = Column(Text)
+    function_name = Column(Text)
+    function_signature = Column(Text)
+    type_enum = Column(Text)
+
+    # Relationships
+    function_id = Column(
+        Integer, ForeignKey("function.id", ondelete="CASCADE"), nullable=True
+    )
+    function = relationship(
+        "Function", back_populates="functions_called", foreign_keys=[function_id]
+    )
+
+    where_function_id = Column(
+        Integer, ForeignKey("where_function.id", ondelete="CASCADE"), nullable=True
+    )
+    where_function = relationship(
+        "WhereFunction",
+        back_populates="functions_called",
+        foreign_keys=[where_function_id],
+    )
+
+
 class Function(Base):
     """Table representing a function."""
 
@@ -47,7 +80,7 @@ class Function(Base):
     src_loc = Column(String(512), nullable=True)
     line_number_start = Column(Integer)
     line_number_end = Column(Integer)
-    type_enum = Column(String(50))
+    type_enum = Column(String(512))
     module_id = Column(Integer, ForeignKey("module.id"))
 
     # Input/output metadata
@@ -56,8 +89,18 @@ class Function(Base):
 
     # Relationships
     module = relationship("Module", back_populates="functions")
-    where_functions = relationship("WhereFunction", back_populates="parent_function")
+    where_functions = relationship(
+        "WhereFunction", back_populates="parent_function", cascade="all, delete-orphan"
+    )
     instance_functions = relationship("InstanceFunction", back_populates="function")
+
+    # Add explicit relationship to functions_called
+    functions_called = relationship(
+        "FunctionCalled",
+        back_populates="function",
+        cascade="all, delete-orphan",
+        foreign_keys="FunctionCalled.function_id",
+    )
 
     # Self-referential many-to-many relationship for function calls
     called_functions = relationship(
@@ -83,6 +126,14 @@ class WhereFunction(Base):
 
     # Relationships
     parent_function = relationship("Function", back_populates="where_functions")
+
+    # Add relationship to functions_called
+    functions_called = relationship(
+        "FunctionCalled",
+        back_populates="where_function",
+        cascade="all, delete-orphan",
+        foreign_keys="FunctionCalled.where_function_id",
+    )
 
 
 class Import(Base):
