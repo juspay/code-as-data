@@ -16,18 +16,27 @@ DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "code_analysis")
+DB_NAME = os.getenv("DB_NAME", "code_as_data")
+
+DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
+DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+DB_POOL_TIMEOUT = float(os.getenv("DB_POOL_TIMEOUT", "30"))
+DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))  # 30 minutes
 
 # Create database URL
 DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Create engine
-engine = create_engine(DATABASE_URL, pool_size=300, max_overflow=100)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+    pool_recycle=DB_POOL_RECYCLE,
+    pool_timeout=DB_POOL_TIMEOUT,
+)
 
 # Create session factory
-SessionLocal = scoped_session(
-    sessionmaker(autoflush=True, bind=engine)
-)
+SessionLocal = scoped_session(sessionmaker(autoflush=True, bind=engine))
 
 # Create base class for models
 Base = declarative_base()
@@ -45,3 +54,18 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_engine_status():
+    """
+    Get the current status of the connection pool.
+
+    Returns:
+        dict: Dictionary with connection pool statistics
+    """
+    return {
+        "pool_size": engine.pool.size(),
+        "checkedin": engine.pool.checkedin(),
+        "checkedout": engine.pool.checkedout(),
+        "overflow": engine.pool.overflow(),
+    }

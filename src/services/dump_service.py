@@ -11,6 +11,7 @@ from sqlalchemy import text
 from contextlib import contextmanager
 
 from src.db.connection import SessionLocal
+from src.db.models import Module
 from src.parsers.function_parser import FunctionParser
 from src.parsers.class_parser import ClassParser
 from src.parsers.import_parser import ImportParser
@@ -163,6 +164,18 @@ class DumpService:
         )
         return instance_parser.load_all_files()
 
+    def get_next_id(self, table_name, id_column="id"):
+        """Get the next available ID for a table."""
+        try:
+            with self.get_session() as db:
+                result = db.execute(
+                    text(f"SELECT COALESCE(MAX({id_column}), 0) + 1 FROM {table_name}")
+                ).scalar()
+                return result or 1  # Return 1 if the result is None (empty table)
+        except Exception as e:
+            print(f"Error getting next ID for {table_name}: {e}")
+            return 1  # Default to 1 if there's an error
+
     def prepare_csv_file(self, table_name, columns):
         """Create and prepare a CSV file for a specific table."""
         file_path = os.path.join(self.temp_dir, f"{table_name}.csv")
@@ -240,14 +253,14 @@ class DumpService:
     def prepare_module_csv(self, module_list):
         """Prepare CSV file for modules."""
         print("Preparing modules CSV...")
-        module_writer = self.prepare_csv_file("module", ["name", "path"])
+        module_writer = self.prepare_csv_file("module", ["id", "name", "path"])
 
-        module_id = 1
+        module_id = self.get_next_id("module")
         for module_name in module_list:
             module_path = self.function_parser.module_name_path.get(
                 module_name, module_name
             )
-            module_writer.writerow([module_name, module_path])
+            module_writer.writerow([module_id, module_name, module_path])
             self.module_id_map[module_name] = module_id
             module_id += 1
 
@@ -268,6 +281,7 @@ class DumpService:
                 "line_number_end",
                 "type_enum",
                 "module_id",
+                "module_name",
                 "function_input",
                 "function_output",
             ],
@@ -330,8 +344,8 @@ class DumpService:
 
         # Second pass - write function data with assigned IDs
         print("Second pass: Writing function data with assigned IDs...")
-        function_id = 1
-        where_function_id = 1
+        function_id = self.get_next_id("function")
+        where_function_id = self.get_next_id("where_function")
 
         # Mapping from canonical keys to function IDs
         canonical_key_to_id = {}
@@ -364,6 +378,7 @@ class DumpService:
                     function.line_number_end,
                     function.type_enum,
                     module_id,
+                    function.module_name,
                     function_input_json,
                     function_output_json,
                 ]
@@ -506,7 +521,7 @@ class DumpService:
             ],
         )
 
-        function_called_id = 1
+        function_called_id = self.get_next_id("function_called")
         function_call_count = 0
 
         # Process all functions and their calls
@@ -639,7 +654,7 @@ class DumpService:
             ],
         )
 
-        class_id = 1
+        class_id = self.get_next_id("class")
         for module_name, classes in classes_by_module.items():
             module_id = self.module_id_map.get(module_name)
             if not module_id:
@@ -686,7 +701,7 @@ class DumpService:
             ],
         )
 
-        import_id = 1
+        import_id = self.get_next_id("import")
         for module_name, imports in imports_by_module.items():
             module_id = self.module_id_map.get(module_name)
             if not module_id:
@@ -758,9 +773,9 @@ class DumpService:
             "type_dependency", ["dependent_id", "dependency_id"]
         )
 
-        type_id = 1
-        constructor_id = 1
-        field_id = 1
+        type_id = self.get_next_id("type")
+        constructor_id = self.get_next_id("constructor")
+        field_id = self.get_next_id("field")
 
         for module_name, types in types_by_module.items():
             module_id = self.module_id_map.get(module_name)
@@ -842,8 +857,8 @@ class DumpService:
             "instance_function", ["id", "instance_id", "function_id"]
         )
 
-        instance_id = 1
-        instance_function_id = 1
+        instance_id = self.get_next_id("instance")
+        instance_function_id = self.get_next_id("instance_function")
 
         for module_name, instances in instances_by_module.items():
             module_id = self.module_id_map.get(module_name)
@@ -1276,7 +1291,6 @@ class DumpService:
                 self.restore_database()
 
             print("Data import completed successfully!")
-
         except Exception as e:
             print(f"Error during data processing and loading: {e}")
             raise

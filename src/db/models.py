@@ -78,6 +78,7 @@ class Function(Base):
     function_signature = Column(Text, nullable=True)
     raw_string = Column(Text, nullable=True)
     src_loc = Column(String(512), nullable=True)
+    module_name = Column(String(255))
     line_number_start = Column(Integer)
     line_number_end = Column(Integer)
     type_enum = Column(String(512))
