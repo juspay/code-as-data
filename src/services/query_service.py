@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional, Any, Union, Callable
+import json
+from typing import Dict, List, Optional, Any, Set, Tuple, Union, Callable
 from sqlalchemy.orm import Session, joinedload, aliased
 from sqlalchemy import func, and_, or_, not_, text
 from sqlalchemy.sql import operators
@@ -6,6 +7,7 @@ from sqlalchemy.sql.expression import cast
 from sqlalchemy.types import String, Integer, Boolean, JSON
 
 from src.db.models import (
+    FunctionCalled,
     Module as DBModule,
     Function as DBFunction,
     WhereFunction as DBWhereFunction,
@@ -1064,3 +1066,1021 @@ class QueryService:
         # Sort by total complexity
         results.sort(key=lambda x: x["metrics"]["total_complexity"], reverse=True)
         return results
+
+    def get_function_call_graph(self, function_id: int, depth: int = 2) -> dict:
+        """
+        Generate a call graph for a function up to a specified depth.
+
+        Args:
+            function_id: ID of the function
+            depth: Maximum depth of the call graph
+
+        Returns:
+            Dictionary representing the call graph
+        """
+        if depth < 1:
+            return {}
+
+        # Get the root function
+        function = (
+            self.db.query(DBFunction)
+            .options(
+                joinedload(DBFunction.module),
+                joinedload(DBFunction.called_functions).joinedload(DBFunction.module),
+            )
+            .filter(DBFunction.id == function_id)
+            .first()
+        )
+
+        if not function:
+            return {}
+
+        # Build the node for the root function
+        root_node = {
+            "id": function.id,
+            "name": function.name,
+            "module": function.module.name if function.module else "Unknown",
+            "calls": [],
+        }
+
+        # Process called functions
+        for called_function in function.called_functions:
+            # Skip self-references
+            if called_function.id == function_id:
+                continue
+
+            # Add the called function as a node
+            called_node = {
+                "id": called_function.id,
+                "name": called_function.name,
+                "module": (
+                    called_function.module.name if called_function.module else "Unknown"
+                ),
+            }
+
+            # If we haven't reached max depth, recursively process the called function
+            if depth > 1:
+                child_graph = self.get_function_call_graph(
+                    called_function.id, depth - 1
+                )
+                if child_graph and "calls" in child_graph:
+                    called_node["calls"] = child_graph["calls"]
+
+            root_node["calls"].append(called_node)
+
+        return root_node
+
+    def search_function_by_content(self, pattern: str) -> List[DBFunction]:
+        """
+        Search for functions containing a specific pattern in their code.
+
+        Args:
+            pattern: Pattern to search for in function code
+
+        Returns:
+            List of functions matching the pattern
+        """
+        # Search in raw_string field using ILIKE for case-insensitive search
+        functions = (
+            self.db.query(DBFunction)
+            .options(joinedload(DBFunction.module))
+            .filter(DBFunction.raw_string.ilike(f"%{pattern}%"))
+            .all()
+        )
+
+        return functions
+
+    def _get_types_by_name(self, type_name: str) -> List[DBType]:
+        """
+        Find all types with given name across all modules.
+
+        Args:
+            type_name: Name of the type to find
+
+        Returns:
+            List of types matching the name
+        """
+        return self.db.query(DBType).filter(DBType.type_name == type_name).all()
+
+    def _get_types_by_path_and_name(
+        self, type_name: str, path_pattern: str
+    ) -> List[DBType]:
+        """
+        Find all types with given name and matching path pattern.
+
+        Args:
+            type_name: Name of the type to find
+            path_pattern: Regular expression pattern to match the source location
+
+        Returns:
+            List of types matching both name and path pattern
+        """
+        types = self._get_types_by_name(type_name)
+        import re
+
+        return [t for t in types if re.search(path_pattern, t.src_loc)]
+
+    def build_type_dependency_graph(self) -> Dict[str, Dict]:
+        """
+        Build a comprehensive type dependency graph from all types in the database.
+
+        Returns:
+            Dictionary representing the graph structure and an index of types
+        """
+        # Create a directed graph structure
+        graph = {}
+        # Index to quickly find nodes by type name
+        type_name_index = {}
+
+        # Get all types from the database
+        types = (
+            self.db.query(DBType)
+            .options(
+                joinedload(DBType.module),
+                joinedload(DBType.constructors).joinedload(DBField),
+            )
+            .all()
+        )
+
+        # Build the graph
+        for type_def in types:
+            type_id = f"{type_def.src_loc}:{type_def.type_name}"
+
+            # Add node and update index
+            if type_id not in graph:
+                graph[type_id] = {
+                    "type_name": type_def.type_name,
+                    "src_loc": type_def.src_loc,
+                    "module_name": type_def.module.name if type_def.module else "",
+                    "edges": [],
+                }
+
+            # Update type name index
+            if type_def.type_name not in type_name_index:
+                type_name_index[type_def.type_name] = []
+            type_name_index[type_def.type_name].append(type_id)
+
+            # Process constructors and their fields
+            for constructor in type_def.constructors:
+                for field in constructor.fields:
+                    # Extract dependent types from field_type_structure
+                    dependencies = set()
+                    if field.field_type_structure:
+                        try:
+                            # Parse the field_type_structure JSON to extract dependencies
+                            structure = json.loads(field.field_type_structure)
+                            dependencies.update(
+                                self._extract_type_dependencies(structure)
+                            )
+                        except json.JSONDecodeError:
+                            pass
+
+                    # Add dependencies to graph
+                    for dep_type_name in dependencies:
+                        # Find all dependent types
+                        dep_types = self._get_types_by_name(dep_type_name)
+                        for dep_type in dep_types:
+                            dep_id = f"{dep_type.src_loc}:{dep_type.type_name}"
+                            if dep_id not in graph[type_id]["edges"]:
+                                graph[type_id]["edges"].append(dep_id)
+
+                        # If no dependent types found, add the name as a node
+                        if (
+                            not dep_types
+                            and dep_type_name not in graph[type_id]["edges"]
+                        ):
+                            graph[type_id]["edges"].append(dep_type_name)
+
+                # Handle empty fields case
+                if not constructor.fields:
+                    constructor_id = constructor.name
+                    if constructor_id not in graph[type_id]["edges"]:
+                        graph[type_id]["edges"].append(constructor_id)
+
+        return {"graph": graph, "type_name_index": type_name_index}
+
+    def _extract_type_dependencies(self, type_structure: Dict) -> Set[str]:
+        """
+        Extract type dependencies from a type structure.
+
+        Args:
+            type_structure: Dictionary representing a type structure
+
+        Returns:
+            Set of dependent type names
+        """
+        dependencies = set()
+
+        # Handle different type structure formats
+        if not type_structure:
+            return dependencies
+
+        # Extract atomic type
+        if type_structure.get("variant") == "AtomicType" and type_structure.get(
+            "atomic_component"
+        ):
+            type_name = type_structure["atomic_component"].get("type_name")
+            if type_name:
+                dependencies.add(type_name)
+
+        # Handle nested structures recursively
+        for key in [
+            "list_type",
+            "app_func",
+            "func_arg",
+            "func_result",
+            "forall_body",
+            "qual_body",
+            "kind_type",
+            "kind_sig",
+            "bang_type",
+            "iparam_type",
+            "doc_type",
+        ]:
+            if key in type_structure and type_structure[key]:
+                dependencies.update(
+                    self._extract_type_dependencies(type_structure[key])
+                )
+
+        # Handle list structures
+        for key in ["tuple_types", "app_args", "qual_context", "promoted_list_types"]:
+            if key in type_structure and isinstance(type_structure[key], list):
+                for item in type_structure[key]:
+                    dependencies.update(self._extract_type_dependencies(item))
+
+        # Handle record fields
+        if "record_fields" in type_structure and type_structure["record_fields"]:
+            for _, field_type in type_structure["record_fields"]:
+                dependencies.update(self._extract_type_dependencies(field_type))
+
+        # Handle forall binders
+        if "forall_binders" in type_structure and type_structure["forall_binders"]:
+            for binder in type_structure["forall_binders"]:
+                type_name = binder.get("type_name")
+                if type_name:
+                    dependencies.add(type_name)
+
+        return dependencies
+
+    def get_subgraph_by_type(
+        self, type_name: str, src_module_name: str, module_pattern: str = None
+    ) -> List[str]:
+        """
+        Get a subgraph of a type dependency graph starting from a specific type.
+
+        Args:
+            type_name: Name of the starting type
+            src_module_name: Name of the module containing the starting type
+            module_pattern: Optional pattern to filter by module name
+
+        Returns:
+            List of node IDs in the subgraph
+        """
+        # Build or retrieve the dependency graph
+        graph_data = self.build_type_dependency_graph()
+        graph = graph_data["graph"]
+        type_name_index = graph_data["type_name_index"]
+
+        # Find start nodes
+        start_nodes = []
+        for node_id in type_name_index.get(type_name, []):
+            node_data = graph.get(node_id, {})
+            if node_data.get("module_name") == src_module_name:
+                start_nodes.append(node_id)
+
+        if not start_nodes:
+            return []
+
+        # Get all reachable nodes using breadth-first search
+        reachable_nodes = set()
+        for start_node in start_nodes:
+            # BFS traversal
+            visited = set([start_node])
+            queue = [start_node]
+
+            while queue:
+                current = queue.pop(0)
+                reachable_nodes.add(current)
+
+                for neighbor in graph.get(current, {}).get("edges", []):
+                    if neighbor in graph and neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+
+        # Filter by module pattern if provided
+        if module_pattern:
+            return [node for node in reachable_nodes if module_pattern in node]
+
+        return list(reachable_nodes)
+
+    def get_all_nested_types(
+        self,
+        type_names: List[str],
+        gateway_name: str,
+        should_not_match: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Get all nested type definitions for a list of type names filtered by gateway name.
+
+        Args:
+            type_names: List of root type names to find
+            gateway_name: Name of the gateway to filter by
+            should_not_match: Optional pattern to exclude
+
+        Returns:
+            List of raw type definitions
+        """
+        try:
+            types_data = []
+
+            for type_name in type_names:
+                # Find all types with the given name
+                types = self._get_types_by_name(type_name)
+                required_core_type_under_gateway = None
+
+                # Find the type under the gateway
+                for type_def in types:
+                    if (
+                        gateway_name in type_def.module.name
+                        if type_def.module
+                        else False
+                    ):
+                        required_core_type_under_gateway = type_def
+                        break
+
+                # If not found, use the first available type
+                if not required_core_type_under_gateway and types:
+                    required_core_type_under_gateway = types[0]
+
+                # Process the core type and its subtypes
+                if required_core_type_under_gateway:
+                    # Add the core type
+                    types_data.append(required_core_type_under_gateway.raw_code)
+
+                    # Get all subtypes
+                    sub_tree_types = self.get_subgraph_by_type(
+                        required_core_type_under_gateway.type_name,
+                        (
+                            required_core_type_under_gateway.module.name
+                            if required_core_type_under_gateway.module
+                            else ""
+                        ),
+                        gateway_name,
+                    )
+
+                    # Process each subtype
+                    for node_id in sub_tree_types:
+                        if node_id == required_core_type_under_gateway.type_name:
+                            continue
+
+                        try:
+                            if ":" in node_id:
+                                # Extract module path and type name
+                                sub_type_module_path = node_id.split(":", 1)[0]
+                                sub_type_type_name = node_id.rsplit(":", 1)[1]
+
+                                # Skip if should_not_match is provided and matches
+                                if (
+                                    should_not_match
+                                    and should_not_match in sub_type_module_path
+                                ):
+                                    continue
+
+                                # Find the type by path and name
+                                type_found = self._get_types_by_path_and_name(
+                                    type_name=sub_type_type_name,
+                                    path_pattern=sub_type_module_path,
+                                )
+
+                                if type_found:
+                                    types_data.append(type_found[0].raw_code)
+                        except Exception as e:
+                            print(f"Error processing subtype {node_id}: {e}")
+
+            # Return unique type definitions
+            return list(set(types_data))
+        except Exception as e:
+            print(f"Error in get_all_nested_types for {type_names}: {e}")
+            return []
+
+    def find_module(
+        self, module_name: str, package_name: Optional[str] = None
+    ) -> List[DBModule]:
+        """
+        Find modules matching the given module name.
+
+        Args:
+            module_name: Name of the module to find
+            package_name: Optional package name (currently unused)
+
+        Returns:
+            List of matching modules
+        """
+        return (
+            self.db.query(DBModule)
+            .filter(DBModule.name.ilike(f"%{module_name}%"))
+            .all()
+        )
+
+    def get_instances_per_module(self, module_name: str) -> List[DBInstance]:
+        """
+        Get all instances for a specific module.
+
+        Args:
+            module_name: Name of the module
+
+        Returns:
+            List of instances for the module
+        """
+        return (
+            self.db.query(DBInstance)
+            .join(DBModule, DBInstance.module_id == DBModule.id)
+            .filter(DBModule.name == module_name)
+            .all()
+        )
+
+    def find_type_by_module_name(
+        self, type_name: str, module_name: str, package_name: Optional[str] = None
+    ) -> List[DBType]:
+        """
+        Find types matching the given name in specified module.
+
+        Args:
+            type_name: Name of the type to find
+            module_name: Name of the module to search in
+            package_name: Optional package name (currently unused)
+
+        Returns:
+            List of matching types
+        """
+        return (
+            self.db.query(DBType)
+            .join(DBModule, DBType.module_id == DBModule.id)
+            .filter(and_(DBType.type_name == type_name, DBModule.name == module_name))
+            .all()
+        )
+
+    def find_function_by_src_loc(
+        self, base_dir_path: str, path: str, line: int
+    ) -> Optional[DBFunction]:
+        """
+        Find the closest function before the given line in the specified file.
+
+        Args:
+            base_dir_path: Base directory path
+            path: Full path to the file
+            line: Line number to find function for
+
+        Returns:
+            Closest function before the line, or None if not found
+        """
+        # Get all functions in the file that start before the specified line
+        candidates = (
+            self.db.query(DBFunction)
+            .join(DBModule, DBFunction.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBFunction.src_loc.ilike(f"%{path}%"),
+                    DBFunction.line_number_start <= line,
+                )
+            )
+            .order_by(DBFunction.line_number_start.desc())
+            .all()
+        )
+
+        # Return the closest function
+        return candidates[0] if candidates else None
+
+    def find_function_by_module_name(
+        self, function_name: str, module_name: str, package_name: Optional[str] = None
+    ) -> List[DBFunction]:
+        """
+        Find functions matching the given name in specified module.
+
+        Args:
+            function_name: Name of the function to find
+            module_name: Name of the module to search in
+            package_name: Optional package name (currently unused)
+
+        Returns:
+            List of matching functions
+        """
+        return (
+            self.db.query(DBFunction)
+            .join(DBModule, DBFunction.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBFunction.name == function_name,
+                    DBModule.name.ilike(f"%{module_name}%"),
+                )
+            )
+            .all()
+        )
+
+    def find_class_by_module_name(
+        self, class_name: str, module_name: str, package_name: Optional[str] = None
+    ) -> List[DBClass]:
+        """
+        Find classes matching the given name in the specified module.
+
+        Args:
+            class_name: Name of the class to find
+            module_name: Name of the module to search in
+            package_name: Optional package name (currently unused)
+
+        Returns:
+            List of matching classes
+        """
+        # Normalize module name to include .hs extension
+        normalized_module_name = f"{module_name}.hs"
+
+        return (
+            self.db.query(DBClass)
+            .join(DBModule, DBClass.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBClass.class_name == class_name,
+                    DBModule.name == normalized_module_name,
+                )
+            )
+            .all()
+        )
+
+    def find_type_by_src_loc(
+        self, base_dir_path: str, path: str, line: int
+    ) -> Optional[DBType]:
+        """
+        Find the closest type definition before the given line in the specified file.
+
+        Args:
+            base_dir_path: Base directory path
+            path: Full path to the file
+            line: Line number to find type for
+
+        Returns:
+            Closest type definition before the line, or None if not found
+        """
+        # Find types that contain the given line
+        candidates = (
+            self.db.query(DBType)
+            .join(DBModule, DBType.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBType.src_loc.ilike(f"%{path}%"),
+                    DBType.line_number_start <= line,
+                    DBType.line_number_end >= line,
+                )
+            )
+            .order_by(DBType.line_number_start.desc())
+            .all()
+        )
+
+        return candidates[0] if candidates else None
+
+    def find_import_by_src_loc(
+        self, base_dir_path: str, path: str, line: int
+    ) -> Optional[DBImport]:
+        """
+        Find the closest import statement before the given line in the specified file.
+
+        Args:
+            base_dir_path: Base directory path
+            path: Full path to the file
+            line: Line number to find import for
+
+        Returns:
+            Closest import statement before the line, or None if not found
+        """
+        # Find imports that contain the given line
+        candidates = (
+            self.db.query(DBImport)
+            .join(DBModule, DBImport.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBImport.src_loc.ilike(f"%{path}%"),
+                    DBImport.line_number_start <= line,
+                    DBImport.line_number_end >= line,
+                )
+            )
+            .order_by(DBImport.line_number_start.desc())
+            .all()
+        )
+
+        return candidates[0] if candidates else None
+
+    def find_class_by_src_loc(
+        self, base_dir_path: str, path: str, line: int
+    ) -> Optional[DBClass]:
+        """
+        Find the closest class definition before the given line in the specified file.
+
+        Args:
+            base_dir_path: Base directory path
+            path: Full path to the file
+            line: Line number to find class for
+
+        Returns:
+            Closest class definition before the line, or None if not found
+        """
+        # Find classes that contain the given line
+        candidates = (
+            self.db.query(DBClass)
+            .join(DBModule, DBClass.module_id == DBModule.id)
+            .filter(
+                and_(
+                    DBClass.src_location.ilike(f"%{path}%"),
+                    DBClass.line_number_start <= line,
+                    DBClass.line_number_end >= line,
+                )
+            )
+            .order_by(DBClass.line_number_start.desc())
+            .all()
+        )
+
+        return candidates[0] if candidates else None
+
+    def get_types_and_functions(self, function_id: int) -> Dict[str, List]:
+        """
+        Get types used in the function.
+
+        Args:
+            function_id: ID of the function to analyze
+
+        Returns:
+            Dictionary with local and non-local types
+        """
+        # Get the function
+        function = (
+            self.db.query(DBFunction).filter(DBFunction.id == function_id).first()
+        )
+        if not function:
+            return {"local_types": [], "non_local_types": []}
+
+        # Get function calls that represent types (TyConApp, FunTy)
+        function_calls = (
+            self.db.query(FunctionCalled)
+            .filter(
+                and_(
+                    FunctionCalled.function_id == function_id,
+                    FunctionCalled._type.in_(["TyConApp", "FunTy"]),
+                )
+            )
+            .all()
+        )
+
+        local_types = []
+        non_local_types = []
+
+        for call in function_calls:
+            # Try to find the type in the database
+            types = self.find_type_by_module_name(
+                type_name=call.name or call.function_name, module_name=call.module_name
+            )
+
+            if types:
+                local_types.extend(types)
+            else:
+                # Create a TypeInfo object for non-local types
+                non_local_types.append(
+                    {
+                        "type_name": call.name or call.function_name,
+                        "module_name": call.module_name,
+                        "package_name": call.package_name,
+                    }
+                )
+
+        # Process where functions recursively
+        where_functions = (
+            self.db.query(DBWhereFunction)
+            .filter(DBWhereFunction.parent_function_id == function_id)
+            .all()
+        )
+
+        for where_function in where_functions:
+            # Get the result from the where function
+            where_result = self.get_types_and_functions(where_function.id)
+            local_types.extend(where_result.get("local_types", []))
+            non_local_types.extend(where_result.get("non_local_types", []))
+
+        return {"local_types": local_types, "non_local_types": non_local_types}
+
+    def get_functions_used(self, function_id: int) -> Dict[str, List]:
+        """
+        Get functions used in the given function.
+
+        Args:
+            function_id: ID of the function to analyze
+
+        Returns:
+            Dictionary with local and other functions
+        """
+        # Get the function
+        function = (
+            self.db.query(DBFunction).filter(DBFunction.id == function_id).first()
+        )
+        if not function:
+            return {"local_functions": [], "other_functions": []}
+
+        # Get function calls
+        function_calls = (
+            self.db.query(FunctionCalled)
+            .filter(FunctionCalled.function_id == function_id)
+            .all()
+        )
+
+        local_functions = []
+        other_functions = []
+
+        for call in function_calls:
+            # Skip types and special functions
+            if (
+                (call.function_signature == call.function_name)
+                or (call._type in ["TyConApp"])
+                or (call.module_name in ["_in", "_type"])
+                or (call.function_signature in ["FunTy", "ForAllTy", "OverLit"])
+            ):
+                continue
+
+            # Try to find the function in the database
+            functions = self.find_function_by_module_name(
+                function_name=call.name or call.function_name,
+                module_name=call.module_name,
+            )
+
+            if functions:
+                local_functions.extend(functions)
+            else:
+                # Create a FunctionInfo object for non-local functions
+                other_functions.append(
+                    {
+                        "module_name": call.module_name,
+                        "function_name": call.name or call.function_name,
+                        "type_signature": call._type,
+                    }
+                )
+
+        # Process where functions recursively
+        where_functions = (
+            self.db.query(DBWhereFunction)
+            .filter(DBWhereFunction.parent_function_id == function_id)
+            .all()
+        )
+
+        for where_function in where_functions:
+            # Get the result from the where function
+            where_result = self.get_functions_used(where_function.id)
+            local_functions.extend(where_result.get("local_functions", []))
+            other_functions.extend(where_result.get("other_functions", []))
+
+        return {"local_functions": local_functions, "other_functions": other_functions}
+
+    def get_functions_used_prompt(self, function_id: int) -> Tuple[str, str]:
+        """
+        Get a formatted prompt for functions used by the given function.
+
+        Args:
+            function_id: ID of the function
+
+        Returns:
+            Tuple of (local_functions_prompt, non_local_functions_prompt)
+        """
+        functions_used = self.get_functions_used(function_id)
+        local_functions = functions_used.get("local_functions", [])
+        non_local_functions = functions_used.get("other_functions", [])
+
+        non_local_functions_prompt = ""
+        for func in non_local_functions:
+            function_name = func.get("function_name", "")
+            type_signature = func.get("type_signature", "")
+
+            if function_name and type_signature:
+                tmp = f"{function_name.replace('\\n', '')} :: {type_signature.replace('\\n', '')}\\n"
+                if tmp not in non_local_functions_prompt:
+                    non_local_functions_prompt += tmp
+
+        local_functions_prompt = ""
+        if local_functions:
+            local_functions_prompt = "```haskell\n"
+
+            for func in local_functions:
+                raw_string = func.raw_string or ""
+                function_name = func.name or ""
+                type_signature = func.function_signature or ""
+
+                if function_name and type_signature:
+                    tmp = f"{function_name.replace('\\n', '')} :: {type_signature.replace('\\n', '')}\\n{raw_string}\\n\\n"
+                    if tmp not in local_functions_prompt:
+                        local_functions_prompt += tmp
+
+            local_functions_prompt += "```"
+
+        return local_functions_prompt, non_local_functions_prompt
+
+    def get_types_used_in_function_prompt(self, function_id: int) -> Tuple[str, str]:
+        """
+        Get a formatted prompt for types used by the given function.
+
+        Args:
+            function_id: ID of the function
+
+        Returns:
+            Tuple of (local_types_prompt, non_local_types_prompt)
+        """
+        types_used = self.get_types_and_functions(function_id)
+        local_types = types_used.get("local_types", [])
+        non_local_types = types_used.get("non_local_types", [])
+
+        local_types_prompt = ""
+        if local_types:
+            local_types_prompt = "```haskell\n"
+
+            for type_obj in local_types:
+                tmp = f"{type_obj.raw_code}\n\n"
+                if tmp not in local_types_prompt:
+                    local_types_prompt += tmp
+
+            local_types_prompt += "```"
+
+        non_local_types_prompt = ""
+        for type_info in non_local_types:
+            tmp = f"{type_info.get('type_name')} imported from this module: {type_info.get('module_name')}\n"
+            if tmp not in non_local_types_prompt:
+                non_local_types_prompt += tmp
+
+        return local_types_prompt, non_local_types_prompt
+
+    def generate_imports_for_element(
+        self, element_name: str, source_module: str, element_type: str = "any"
+    ) -> List[str]:
+        """
+        Generate all necessary import statements for a given element (type, function, class, etc.)
+        by analyzing how it was imported in the source module.
+
+        Args:
+            element_name: Name of the element to generate imports for
+            source_module: Name of the module where the element is used
+            element_type: Type of the element ('function', 'type', 'class', 'any')
+
+        Returns:
+            List of import statements as strings
+        """
+        # Get the module information
+        module = self.db.query(DBModule).filter(DBModule.name == source_module).first()
+        if not module:
+            return [f"# Unable to find module '{source_module}'"]
+
+        # Get all imports for the module
+        imports = (
+            self.db.query(DBImport)
+            .filter(DBImport.module_id == module.id)
+            .options(joinedload(DBImport.module))
+            .all()
+        )
+
+        # Find imports that might contain the element
+        relevant_imports = []
+
+        for import_stmt in imports:
+            # Direct module import (e.g., import X)
+            if import_stmt.module_name and element_name in import_stmt.module_name:
+                relevant_imports.append(import_stmt)
+
+            # Element could be imported from a package (e.g., from X import Y)
+            elif (
+                element_name == import_stmt.module_name
+                or element_name == import_stmt.as_module_name
+            ):
+                relevant_imports.append(import_stmt)
+
+            # Check hiding specs if this is a selective import
+            elif import_stmt.hiding_specs and isinstance(
+                import_stmt.hiding_specs, list
+            ):
+                for spec in import_stmt.hiding_specs:
+                    if spec == element_name:
+                        relevant_imports.append(import_stmt)
+                        break
+
+        # If no direct imports found, try to find element in the database to determine origin
+        if not relevant_imports:
+            # Try to find the element based on its type
+            element_origins = []
+
+            if element_type in ["function", "any"]:
+                # Find functions with this name
+                functions = (
+                    self.db.query(DBFunction)
+                    .filter(DBFunction.name == element_name)
+                    .options(joinedload(DBFunction.module))
+                    .all()
+                )
+                for func in functions:
+                    if func.module:
+                        element_origins.append((func.module.name, "function"))
+
+            if element_type in ["type", "any"]:
+                # Find types with this name
+                types = (
+                    self.db.query(DBType)
+                    .filter(DBType.type_name == element_name)
+                    .options(joinedload(DBType.module))
+                    .all()
+                )
+                for type_def in types:
+                    if type_def.module:
+                        element_origins.append((type_def.module.name, "type"))
+
+            if element_type in ["class", "any"]:
+                # Find classes with this name
+                classes = (
+                    self.db.query(DBClass)
+                    .filter(DBClass.class_name == element_name)
+                    .options(joinedload(DBClass.module))
+                    .all()
+                )
+                for class_def in classes:
+                    if class_def.module:
+                        element_origins.append((class_def.module.name, "class"))
+
+            # Generate imports based on element origins
+            for origin_module, _ in element_origins:
+                if (
+                    origin_module != source_module
+                ):  # Don't need to import from the same module
+                    relevant_imports.append(
+                        {
+                            "module_name": origin_module,
+                            "is_implicit": False,
+                            "as_module_name": None,
+                            "qualified_style": {"tag": "NotQualified"},
+                            "is_hiding": False,
+                            "hiding_specs": None,
+                        }
+                    )
+
+        # Format imports as strings - using Haskell import syntax
+        import_statements = []
+
+        for import_info in relevant_imports:
+            if isinstance(import_info, dict):
+                # Handle synthetic import information
+                module_name = import_info.get("module_name", "")
+                as_clause = (
+                    f" as {import_info.get('as_module_name')}"
+                    if import_info.get("as_module_name")
+                    else ""
+                )
+                qualified = (
+                    "qualified "
+                    if import_info.get("qualified_style", {}).get("tag") == "Qualified"
+                    else ""
+                )
+
+                # Format the import statement
+                import_statements.append(f"import {qualified}{module_name}{as_clause}")
+            else:
+                # Handle actual import objects from the database
+                module_name = import_info.module_name or ""
+                as_clause = (
+                    f" as {import_info.as_module_name}"
+                    if import_info.as_module_name
+                    else ""
+                )
+
+                # Get qualification info
+                qualified_style = ""
+                if (
+                    hasattr(import_info, "qualified_style")
+                    and import_info.qualified_style
+                ):
+                    # Handle qualified style as string or dict
+                    if (
+                        isinstance(import_info.qualified_style, dict)
+                        and import_info.qualified_style.get("tag") == "Qualified"
+                    ):
+                        qualified_style = "qualified "
+                    elif import_info.qualified_style == "Qualified":
+                        qualified_style = "qualified "
+
+                # Handle hiding specs
+                hiding_clause = ""
+                if import_info.is_hiding and import_info.hiding_specs:
+                    hiding_list = ", ".join(import_info.hiding_specs)
+                    hiding_clause = f" hiding ({hiding_list})"
+                elif import_info.hiding_specs:
+                    # For selective imports in Haskell syntax
+                    import_list = ", ".join(import_info.hiding_specs)
+                    hiding_clause = f" ({import_list})"
+
+                # Construct the full import statement in Haskell syntax
+                import_statements.append(
+                    f"import {qualified_style}{module_name}{hiding_clause}{as_clause}"
+                )
+
+        # Remove duplicates while preserving order
+        unique_imports = []
+        for stmt in import_statements:
+            if stmt not in unique_imports:
+                unique_imports.append(stmt)
+
+        return unique_imports

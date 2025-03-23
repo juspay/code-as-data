@@ -91,25 +91,25 @@ Use the query script to explore code structure:
 
 ```bash
 # List all modules
-python scripts/query.py list-modules
+python examples/query.py list-modules
 
 # Show module details
-python scripts/query.py module "module.name"
+python examples/query.py module "module.name"
 
 # Show function details
-python scripts/query.py function "functionName" --module "module.name"
+python examples/query.py function "functionName" --module "module.name"
 
 # Show type details
-python scripts/query.py type "TypeName" --module "module.name"
+python examples/query.py type "TypeName" --module "module.name"
 
 # Find most called functions
-python scripts/query.py most-called --limit 20
+python examples/query.py most-called --limit 20
 
 # Generate function call graph
-python scripts/query.py call-graph "functionName" "module.name" --depth 3
+python examples/query.py call-graph "functionName" "module.name" --depth 3
 
 # Search for functions containing specific patterns
-python scripts/query.py search "pattern"
+python examples/query.py search "pattern"
 ```
 
 ## Using as a Library
@@ -814,6 +814,11 @@ To tune performance:
 3. Commit your changes: `git commit -m 'Add some feature'`
 4. Push to the branch: `git push origin feature-name`
 5. Submit a pull request
+
+## TODO
+
+- [ ] Multiple repo support
+- [ ] Multiple commit support
 
 ## License
 
