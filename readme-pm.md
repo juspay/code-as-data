@@ -12,7 +12,7 @@ The database stores information about code components extracted from a codebase,
 
 ### Tables and Relationships
 
-<img src=images/mermaid-flow-transparent.svg />
+![Image](./images/mermaid-flow-transparent.svg)
 
 #### Main Tables
 
