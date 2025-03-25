@@ -1,3 +1,5 @@
+# Code as data - Haskell
+
 # SQL Query Guide for Code Analysis Database
 
 This guide provides information on how to directly query the code analysis database using SQL without needing to write Python code. It includes:
@@ -5,6 +7,8 @@ This guide provides information on how to directly query the code analysis datab
 - Database schema overview
 - Table descriptions and relationships
 - Common SQL query examples
+
+NOTE: If your a dev then you might prefer going through <a href="https://www.postgresql.org/docs/](https://github.com/juspay/code-as-data/blob/main/readme-dev.md"> this </a>
 
 ## Database Schema Overview
 
