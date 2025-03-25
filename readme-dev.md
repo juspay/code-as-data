@@ -823,7 +823,3 @@ To tune performance:
 
 - [ ] Multiple repo support
 - [ ] Multiple commit support
-
-## License
-
-[MIT License](LICENSE)
