@@ -10,18 +10,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from contextlib import contextmanager
 
-from src.db.connection import SessionLocal
-from src.db.models import Module
-from src.parsers.function_parser import FunctionParser
-from src.parsers.class_parser import ClassParser
-from src.parsers.import_parser import ImportParser
-from src.parsers.type_parser import TypeParser
-from src.parsers.instance_parser import InstanceParser
-from src.models.function_model import Function
-from src.models.class_model import Class
-from src.models.import_model import Import
-from src.models.type_model import Type
-from src.models.instance_model import Instance
+from src.code_as_data.db.connection import SessionLocal
+from src.code_as_data.db.models import Module
+from src.code_as_data.parsers.function_parser import FunctionParser
+from src.code_as_data.parsers.class_parser import ClassParser
+from src.code_as_data.parsers.import_parser import ImportParser
+from src.code_as_data.parsers.type_parser import TypeParser
+from src.code_as_data.parsers.instance_parser import InstanceParser
+from src.code_as_data.models.function_model import Function
+from src.code_as_data.models.class_model import Class
+from src.code_as_data.models.import_model import Import
+from src.code_as_data.models.type_model import Type
+from src.code_as_data.models.instance_model import Instance
 import concurrent.futures
 
 MAX_RETRIES = 3

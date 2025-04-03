@@ -9,8 +9,8 @@ import argparse
 # Add the project root to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.db.connection import engine, Base
-from src.db.models import *
+from src.code_as_data.db.connection import engine, Base
+from src.code_as_data.db.models import *
 
 
 def setup_database(drop_tables: bool = False):
