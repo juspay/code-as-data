@@ -9,8 +9,8 @@ from sqlalchemy.orm import sessionmaker
 # Adjust path to import from src directory
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.code_as_data.services.query_service import QueryService
-from src.code_as_data.db.models import (
+from code_as_data.services.query_service import QueryService
+from code_as_data.db.models import (
     Module,
     Function,
     WhereFunction,
@@ -23,7 +23,7 @@ from src.code_as_data.db.models import (
     InstanceFunction,
     function_dependency,
 )
-from src.code_as_data.db.connection import Base
+from code_as_data.db.connection import Base
 
 
 class TestQueryService(unittest.TestCase):

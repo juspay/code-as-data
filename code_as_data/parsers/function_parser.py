@@ -8,7 +8,7 @@ import multiprocessing
 import io
 
 from . import list_files_recursive, get_module_name, error_trace
-from ..models.function_model import Function
+from code_as_data.models.function_model import Function
 
 
 class FunctionParser:

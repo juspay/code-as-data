@@ -2,7 +2,7 @@ import json
 from typing import Dict, List, Optional
 
 from . import list_files_recursive, get_module_name, error_trace
-from ..models.import_model import Import
+from code_as_data.models.import_model import Import
 
 
 class ImportParser:

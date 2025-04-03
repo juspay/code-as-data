@@ -10,8 +10,8 @@ import time
 # Add the project root to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.code_as_data.db.connection import SessionLocal
-from src.code_as_data.services.dump_service import DumpService
+from code_as_data.db.connection import SessionLocal
+from code_as_data.services.dump_service import DumpService
 
 
 def import_dumps(fdep_path: str, field_inspector_path: str, clear_db: bool = False):

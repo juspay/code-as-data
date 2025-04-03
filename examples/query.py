@@ -10,8 +10,8 @@ import json
 # Add the project root to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.db.connection import SessionLocal
-from src.services.query_service import QueryService
+from code_as_data.db.connection import SessionLocal
+from code_as_data.services.query_service import QueryService
 
 
 def list_modules():
