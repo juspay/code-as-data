@@ -3,8 +3,8 @@ import concurrent.futures
 from typing import Dict, List, Optional
 
 from . import list_files_recursive, get_module_name, error_trace
-from src.code_as_data.models.instance_model import Instance
-from src.code_as_data.models.function_model import Function
+from ..models.instance_model import Instance
+from ..models.function_model import Function
 
 
 class InstanceParser:

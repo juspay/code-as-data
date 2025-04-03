@@ -3,7 +3,7 @@ import os
 from typing import Dict, List, Optional, Any
 
 from . import list_files_recursive, get_module_name, error_trace
-from src.code_as_data.models.type_model import (
+from ..models.type_model import (
     Type,
     TypeField,
     StructuredTypeRep,

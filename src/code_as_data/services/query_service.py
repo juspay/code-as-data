@@ -6,7 +6,7 @@ from sqlalchemy.sql import operators
 from sqlalchemy.sql.expression import cast
 from sqlalchemy.types import String, Integer, Boolean, JSON
 
-from src.code_as_data.db.models import (
+from ..db.models import (
     FunctionCalled,
     Module as DBModule,
     Function as DBFunction,
