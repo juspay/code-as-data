@@ -55,6 +55,26 @@ class FunctionParser:
             error_trace(e)
             print("update_nested_key", e)
 
+    def load(self) -> Dict[str, List[Function]]:
+        """
+        Process function dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to functions
+        """
+        # Load function data
+        self.load_all_files()
+
+        functions = self.get_functions()
+
+        functions_by_module = {}
+        for function in functions:
+            if function.module_name not in functions_by_module:
+                functions_by_module[function.module_name] = []
+            functions_by_module[function.module_name].append(function)
+
+        return functions_by_module
+
     def load_all_files(self) -> Dict:
         """
         Load all function files in the directory using a sequential approach optimized for I/O.
