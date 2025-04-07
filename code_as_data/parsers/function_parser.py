@@ -132,8 +132,31 @@ class FunctionParser:
 
             try:
                 # Process the file
-                with open(file_path, "r") as f:
-                    file_data = json.load(f)
+                file_data = dict()
+                with open(file_path, "r") as y:
+                    try:
+                        file_data = json.load(y)
+                    except Exception as _:
+                        y.close()
+                    # if the file is JSONL format , preprocess to match the dict[key] format
+                    # {"typeSignature":"Application -> Application -> Application","key":"$_in$appDecider**app/Main.hs:266:1-10"}
+                        with open(file_path, "r") as f:
+                            try:
+                                tmp_data = set(f.readlines())
+                                for i in tmp_data:
+                                    try:
+                                        t = json.loads(i)
+                                    except Exception as e:
+                                        pass
+                                        # print(i)
+                                    key = t.get("key")
+                                    if file_data.get(key) == None:
+                                        file_data[key] = []
+                                    file_data[key].append(t)
+                            except Exception as e:
+                                error_trace(e)
+                            finally:
+                                f.close()
 
                 # Get code strings for this module
                 module_code_strings = code_strings.get(module_name, {})
@@ -150,6 +173,7 @@ class FunctionParser:
 
             except Exception as e:
                 print(f"Error processing file {file_path}: {e}")
+                error_trace(e)
 
             # Update progress
             processed_files += 1
