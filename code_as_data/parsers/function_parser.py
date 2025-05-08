@@ -110,6 +110,8 @@ class FunctionParser:
 
         # Pre-load all code string data in a single pass
         code_strings = {}
+        functions_vs_instances_used = {}
+        # Types.hs.function_instance_mapping.json
         for file_path in files:
             module_name = module_names[file_path]
             function_code_path = file_path.replace(".hs.json", ".hs.function_code.json")
@@ -119,6 +121,26 @@ class FunctionParser:
             except Exception:
                 code_strings[module_name] = {}
 
+            def get_function_name_from_name_stable_string(name):
+                return name.split("$")[-1]
+
+            instances_used_per_function_path = file_path.replace(
+                ".hs.json", ".hs.function_instance_mapping.json"
+            )
+
+            try:
+                with open(instances_used_per_function_path, "r") as f:
+                    functions_vs_instances_used[module_name] = json.load(f)
+                    functions_vs_instances_used[module_name] = {
+                        get_function_name_from_name_stable_string(k): [s for (f,s) in v]
+                        for k, v in functions_vs_instances_used[module_name].items()
+                    }
+            except Exception:
+                functions_vs_instances_used[module_name] = {}
+
+        with open("functions_vs_instances_used.json","w") as f:
+            json.dump(functions_vs_instances_used,f,indent=4)
+        
         # Process files
         processed_files = 0
         start_time = time.time()
@@ -138,8 +160,8 @@ class FunctionParser:
                         file_data = json.load(y)
                     except Exception as _:
                         y.close()
-                    # if the file is JSONL format , preprocess to match the dict[key] format
-                    # {"typeSignature":"Application -> Application -> Application","key":"$_in$appDecider**app/Main.hs:266:1-10"}
+                        # if the file is JSONL format , preprocess to match the dict[key] format
+                        # {"typeSignature":"Application -> Application -> Application","key":"$_in$appDecider**app/Main.hs:266:1-10"}
                         with open(file_path, "r") as f:
                             try:
                                 tmp_data = set(f.readlines())
@@ -160,10 +182,17 @@ class FunctionParser:
 
                 # Get code strings for this module
                 module_code_strings = code_strings.get(module_name, {})
-
+                
+                module_functions_vs_instances_used = functions_vs_instances_used.get(
+                    module_name, {}
+                )
                 # Process the data
                 local_fdep = self._process_module_data(
-                    file_path, file_data, module_name, module_code_strings
+                    file_path,
+                    file_data,
+                    module_name,
+                    module_code_strings,
+                    module_functions_vs_instances_used,
                 )
 
                 # Update data structures
@@ -201,7 +230,12 @@ class FunctionParser:
         return self.data
 
     def _process_module_data(
-        self, file_path: str, obj: Dict, module_name: str, code_string_dict: Dict
+        self,
+        file_path: str,
+        obj: Dict,
+        module_name: str,
+        code_string_dict: Dict,
+        module_functions_vs_instances_used: Dict,
     ) -> Dict:
         """
         Process the module data and return local fdep dictionary.
@@ -244,6 +278,9 @@ class FunctionParser:
                         local_fdep[fName]["line_number_end"] = code_string_dict.get(
                             fName, {}
                         ).get("line_number", [-1, -1])[1]
+
+                    if module_functions_vs_instances_used.get(fName.split("**")[0].split("$")[-1]) != None:
+                        local_fdep[fName]["instances_used"] = module_functions_vs_instances_used.get(fName.split("**")[0].split("$")[-1])
 
                     for i in functionData:
                         if i and i.get("typeSignature") is not None:
@@ -382,6 +419,7 @@ class FunctionParser:
                     line_number_end=line_number_end,
                     function_input=function_body.get("function_input"),
                     function_output=function_body.get("function_output"),
+                    instances_used=function_body.get("instances_used",[])
                 )
 
                 functions.append(function)

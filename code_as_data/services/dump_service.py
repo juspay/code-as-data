@@ -20,7 +20,7 @@ from code_as_data.parsers.instance_parser import InstanceParser
 from code_as_data.models.function_model import Function
 from code_as_data.models.class_model import Class
 from code_as_data.models.import_model import Import
-from code_as_data.models.type_model import Type
+from code_as_data.models.type_model import Type, TypeVariant
 from code_as_data.models.instance_model import Instance
 import concurrent.futures
 
@@ -284,6 +284,7 @@ class DumpService:
                 "module_name",
                 "function_input",
                 "function_output",
+                "instances_used"
             ],
         )
 
@@ -309,7 +310,7 @@ class DumpService:
         print("First pass: Generating robust function ID mappings...")
 
         # Dictionary to store all functions with their signatures for disambiguation
-        all_functions = {}
+        all_functions:Dict[(str,Function)] = {}
         function_canonical_keys = {}
 
         for module_name, functions in functions_by_module.items():
@@ -381,6 +382,7 @@ class DumpService:
                     function.module_name,
                     function_input_json,
                     function_output_json,
+                    json.dumps(function.instances_used)
                 ]
             )
 
@@ -776,6 +778,7 @@ class DumpService:
         type_id = self.get_next_id("type")
         constructor_id = self.get_next_id("constructor")
         field_id = self.get_next_id("field")
+        type_dependencies = set()
 
         for module_name, types in types_by_module.items():
             module_id = self.module_id_map.get(module_name)
@@ -827,15 +830,173 @@ class DumpService:
                             ]
                         )
 
+                        if field.field_type.structure:
+                            self._extract_type_dependencies(
+                                field.field_type.structure,
+                                module_name,
+                                type_obj.type_name,
+                                type_dependencies,
+                            )
+
                         field_id += 1
 
                     constructor_id += 1
 
                 type_id += 1
+        # Second pass: Write all type dependencies
+        dependency_count = 0
+        for (
+            dependent_module,
+            dependent_name,
+            dependency_module,
+            dependency_name,
+        ) in type_dependencies:
+            dependent_id = self.type_id_map.get((dependent_module, dependent_name))
+            dependency_id = self.type_id_map.get((dependency_module, dependency_name))
+
+            if dependent_id and dependency_id and dependent_id != dependency_id:
+                # Avoid self-dependencies and ensure both types exist
+                type_dependency_writer.writerow([dependent_id, dependency_id])
+                dependency_count += 1
 
         print(
-            f"Prepared {type_id-1} types, {constructor_id-1} constructors, and {field_id-1} fields for bulk loading"
+            f"Prepared {type_id-1} types, {constructor_id-1} constructors, {field_id-1} fields, "
+            f"and {dependency_count} type dependencies for bulk loading"
         )
+
+    def _extract_type_dependencies(
+        self, complex_type, current_module, current_type, dependencies_set
+    ):
+        """
+        Recursively extract type dependencies from a ComplexType structure.
+
+        Args:
+            complex_type: The ComplexType to analyze
+            current_module: The module name of the current type
+            current_type: The name of the current type
+            dependencies_set: Set to store discovered dependencies
+        """
+        if not complex_type:
+            return
+
+        # Process based on variant type
+        if complex_type.variant == TypeVariant.ATOMIC and complex_type.atomic_component:
+            # Handle atomic type component
+            component = complex_type.atomic_component
+            if component.type_name and component.type_name != current_type:
+                # Use module_name from component if available, otherwise use current_module
+                dependency_module = (
+                    component.module_name
+                    if hasattr(component, "module_name") and component.module_name
+                    else current_module
+                )
+                dependencies_set.add(
+                    (
+                        current_module,
+                        current_type,
+                        dependency_module,
+                        component.type_name,
+                    )
+                )
+                print((
+                        current_module,
+                        current_type,
+                        dependency_module,
+                        component.type_name,
+                    ))
+
+        elif complex_type.variant == TypeVariant.LIST and complex_type.list_type:
+            # Process list element type
+            self._extract_type_dependencies(
+                complex_type.list_type, current_module, current_type, dependencies_set
+            )
+
+        elif complex_type.variant == TypeVariant.TUPLE and complex_type.tuple_types:
+            # Process each tuple element type
+            for tuple_type in complex_type.tuple_types:
+                self._extract_type_dependencies(
+                    tuple_type, current_module, current_type, dependencies_set
+                )
+
+        elif (
+            complex_type.variant == TypeVariant.APP
+            and complex_type.app_func
+            and complex_type.app_args
+        ):
+            # Process application function and its arguments
+            self._extract_type_dependencies(
+                complex_type.app_func, current_module, current_type, dependencies_set
+            )
+            for arg in complex_type.app_args:
+                self._extract_type_dependencies(
+                    arg, current_module, current_type, dependencies_set
+                )
+
+        elif (
+            complex_type.variant == TypeVariant.FUNC
+            and complex_type.func_arg
+            and complex_type.func_result
+        ):
+            # Process function argument and result types
+            self._extract_type_dependencies(
+                complex_type.func_arg, current_module, current_type, dependencies_set
+            )
+            self._extract_type_dependencies(
+                complex_type.func_result, current_module, current_type, dependencies_set
+            )
+
+        elif (
+            complex_type.variant == TypeVariant.FORALL
+            and complex_type.forall_binders
+            and complex_type.forall_body
+        ):
+            # Process forall body (skip binders as they're type variables)
+            self._extract_type_dependencies(
+                complex_type.forall_body, current_module, current_type, dependencies_set
+            )
+
+        elif (
+            complex_type.variant == TypeVariant.QUAL
+            and complex_type.qual_context
+            and complex_type.qual_body
+        ):
+            # Process qualification context and body
+            for context_type in complex_type.qual_context:
+                self._extract_type_dependencies(
+                    context_type, current_module, current_type, dependencies_set
+                )
+            self._extract_type_dependencies(
+                complex_type.qual_body, current_module, current_type, dependencies_set
+            )
+
+        elif complex_type.variant == TypeVariant.KIND_SIG and complex_type.kind_type:
+            # Process kind signature type
+            self._extract_type_dependencies(
+                complex_type.kind_type, current_module, current_type, dependencies_set
+            )
+
+        elif complex_type.variant == TypeVariant.BANG and complex_type.bang_type:
+            # Process bang type
+            self._extract_type_dependencies(
+                complex_type.bang_type, current_module, current_type, dependencies_set
+            )
+
+        elif complex_type.variant == TypeVariant.RECORD and complex_type.record_fields:
+            # Process record fields
+            for _, field_type in complex_type.record_fields:
+                self._extract_type_dependencies(
+                    field_type, current_module, current_type, dependencies_set
+                )
+
+        elif (
+            complex_type.variant == TypeVariant.PROMOTED_LIST
+            and complex_type.promoted_list_types
+        ):
+            # Process promoted list types
+            for list_type in complex_type.promoted_list_types:
+                self._extract_type_dependencies(
+                    list_type, current_module, current_type, dependencies_set
+                )
 
     def prepare_instance_csv(self, instances_by_module):
         """Prepare CSV files for instances and instance_function associations."""

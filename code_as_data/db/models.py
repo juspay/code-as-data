@@ -82,6 +82,7 @@ class Function(Base):
     line_number_start = Column(Integer)
     line_number_end = Column(Integer)
     type_enum = Column(String(512))
+    instances_used = Column(Text, nullable=True)
     module_id = Column(Integer, ForeignKey("module.id"))
 
     # Input/output metadata

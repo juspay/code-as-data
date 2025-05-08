@@ -57,6 +57,7 @@ class Function(BaseModel):
     type_enum: str
     line_number_start: int
     line_number_end: int
+    instances_used: Optional[List[Any]] = None
     function_input: Optional[List[Any]] = None
     function_output: Optional[List[Any]] = None
 

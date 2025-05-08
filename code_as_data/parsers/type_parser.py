@@ -79,7 +79,8 @@ class TypeParser:
                 to_replace=".hs.types.parser.json",
             )
 
-            for key, value in data.items():
+            for d in data:
+                key, value = (d.get("name"),d)
                 # Get raw code data
                 raw_code_data = raw_code.get(key, {})
 
@@ -177,14 +178,14 @@ class TypeParser:
 
         # Find and process all type files
         typesJSONList = list_files_recursive(
-            self.json_path, pattern="hs.types.parser.json"
+            self.json_path, pattern="hs.type-info.json"
         )
 
         for file_path in typesJSONList:
             module_name = get_module_name(
                 base_dir_path=self.json_path,
                 path=file_path,
-                to_replace=".hs.types.parser.json",
+                to_replace=".hs.type-info.json",
             )
             raw_code = self.raw_code_cache.get(module_name, {})
             types = self._load_type_file(file_path, raw_code)

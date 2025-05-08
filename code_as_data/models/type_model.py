@@ -34,6 +34,8 @@ class TypeComponent(BaseModel):
     """Model representing a type component."""
 
     type_name: str
+    module_name: str
+    package_name: str
 
 
 class TypeVariant(str, Enum):
