@@ -1,4 +1,4 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.1
 Name: code_as_data
 Version: 0.1.0
 Requires-Python: >=3.6
@@ -33,6 +33,3 @@ Requires-Dist: six
 Requires-Dist: SQLAlchemy
 Requires-Dist: tqdm
 Requires-Dist: typing_extensions
-Dynamic: license-file
-Dynamic: requires-dist
-Dynamic: requires-python
