@@ -6,6 +6,10 @@ import os
 import sys
 import argparse
 import json
+from typing import Optional
+from networkx.drawing.nx_agraph import graphviz_layout
+import networkx as nx
+import matplotlib.pyplot as plt
 
 # Add the project root to the path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -56,7 +60,7 @@ def module_details(module_name):
         types = query_service.get_types_by_module(module.id)
         print(f"Types: {len(types)}")
 
-        # Get class count
+        # Get class countq
         classes = query_service.get_classes_by_module(module.id)
         print(f"Classes: {len(classes)}")
 
@@ -183,7 +187,109 @@ def type_details(type_name, module_name=None):
     finally:
         db.close()
 
+def full_type_dependency_graph():
+    """
+    Builds, prints, and plots the full type dependency graph for all types in the database.
+    """
+    db = SessionLocal()
+    query_service = QueryService(db)
+    try:
+        result = query_service.build_type_dependency_graph()
+        graph_data = result["graph"]
 
+        G = nx.DiGraph()
+
+        print("Type Dependency Edges:\n" + "-" * 40)
+        for parent_id, info in graph_data.items():
+            # Use full parent ID as node
+            parent_node = parent_id
+
+            if not parent_node or not isinstance(parent_node, str):
+                print(f"Skipping invalid parent node: {parent_node}")
+                continue
+
+            for child_id in info.get("edges", []):
+                child_node = child_id  # child_id can be either full ID or just a name
+
+                if not child_node or not isinstance(child_node, str):
+                    print(f"Skipping invalid child node: {child_node}")
+                    continue
+
+                print(f"{parent_node} -> {child_node}")
+                G.add_edge(parent_node, child_node)
+
+        print(f"\nTotal types (nodes): {len(G.nodes)}")
+        print(f"Total dependencies (edges): {len(G.edges)}")
+
+        # Optional label simplification (for cleaner display)
+        labels = {
+            node: node.split(":")[-1] if ":" in node else node
+            for node in G.nodes
+        }
+
+        # Generate layout using Graphviz
+        pos = graphviz_layout(G, prog="dot")
+
+        # Draw graph
+        plt.figure(figsize=(18, 14))
+        nx.draw(
+            G, pos, labels=labels, with_labels=True, arrows=True,
+            node_color="lightblue", edge_color="gray",
+            node_size=1200, font_size=9, font_weight="bold"
+        )
+        plt.title("Full Type Dependency Graph", fontsize=16)
+        plt.tight_layout()
+        plt.show()
+        output_file = "type_dependency_graph.gexf"
+        nx.write_gexf(G, output_file)
+        print(f"\nGraph exported to {output_file} — open it with Gephi or Cytoscape.")
+
+    finally:
+        db.close()
+
+def type_graph(type_name: str, src_module_name: str, module_pattern: Optional[str] = None):
+    """
+    Fetches and prints the subgraph for a given type and module.
+
+    Args:
+        type_name (str): The name of the type.
+        src_module_name (str): The source module name.
+        module_pattern (Optional[str], optional): A pattern to filter modules. Defaults to None.
+    """
+    db = SessionLocal()
+    try: 
+        # Initialize the QueryService
+        query_service = QueryService(db)
+
+        # Fetch the subgraph
+        subgraph = query_service.get_subgraph_by_type(type_name, src_module_name, module_pattern)
+
+        # Print the subgraph
+        print(f"Subgraph for type '{type_name}' in module '{src_module_name}':")
+        for item in subgraph:
+            print(item)
+        
+        G = nx.DiGraph()
+
+        # Create edges from the root type to each item in the subgraph
+        root_node = type_name
+        for item in subgraph:
+            child_node = item.split(":")[-1]  # Extract just the type name for readability
+            G.add_edge(root_node, child_node)
+
+        # Draw the graph
+        plt.figure(figsize=(12, 8))
+        pos = nx.spring_layout(G)
+        nx.draw(
+            G, pos, with_labels=True, arrows=True,
+            node_color="lightblue", edge_color="gray", node_size=2000, font_size=10
+        )
+        plt.title(f"Type Dependency Graph for: {type_name}")
+        plt.show()
+
+    finally:
+        db.close()
+        
 def most_called_functions(limit=10):
     """
     Show the most called functions.
@@ -283,6 +389,19 @@ if __name__ == "__main__":
     type_parser.add_argument("name", help="Type name")
     type_parser.add_argument("--module", help="Module name filter")
 
+    # Type dependency graph for all types
+    type_dep_graph_parser = subparsers.add_parser(
+        "type-dep-graph", help="Show full type dependency graph for all types"
+    )
+
+    # Type graph command
+    type_graph_parser = subparsers.add_parser("type-graph", help="Show type dependency graph")
+    type_graph_parser.add_argument("type_name", help="Type name")
+    type_graph_parser.add_argument("src_module_name", help="Source module name")
+    type_graph_parser.add_argument(
+        "--module-pattern", help="Module pattern to filter modules", default=None
+    )
+
     # Most called functions command
     most_called_parser = subparsers.add_parser(
         "most-called", help="Show most called functions"
@@ -316,6 +435,10 @@ if __name__ == "__main__":
         function_details(args.name, args.module)
     elif args.command == "type":
         type_details(args.name, args.module)
+    elif args.command == "type-dep-graph":
+        full_type_dependency_graph()
+    elif args.command == "type-graph":
+        type_graph(args.type_name, args.src_module_name, args.module_pattern)
     elif args.command == "most-called":
         most_called_functions(args.limit)
     elif args.command == "call-graph":

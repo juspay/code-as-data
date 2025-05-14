@@ -1197,7 +1197,7 @@ class QueryService:
             self.db.query(DBType)
             .options(
                 joinedload(DBType.module),
-                joinedload(DBType.constructors).joinedload(DBField),
+                joinedload(DBType.constructors).joinedload(DBConstructor.fields),
             )
             .all()
         )
@@ -1228,7 +1228,7 @@ class QueryService:
                     if field.field_type_structure:
                         try:
                             # Parse the field_type_structure JSON to extract dependencies
-                            structure = json.loads(field.field_type_structure)
+                            structure = field.field_type_structure
                             dependencies.update(
                                 self._extract_type_dependencies(structure)
                             )
@@ -1854,7 +1854,9 @@ class QueryService:
             type_signature = func.get("type_signature", "")
 
             if function_name and type_signature:
-                tmp = f"{function_name.replace('\\n', '')} :: {type_signature.replace('\\n', '')}\\n"
+                cleaned_function_name = function_name.replace('\n', '')
+                cleaned_type_signature = type_signature.replace('\n', '')
+                tmp = f"{cleaned_function_name} :: {cleaned_type_signature}\n"
                 if tmp not in non_local_functions_prompt:
                     non_local_functions_prompt += tmp
 
@@ -1868,9 +1870,12 @@ class QueryService:
                 type_signature = func.function_signature or ""
 
                 if function_name and type_signature:
-                    tmp = f"{function_name.replace('\\n', '')} :: {type_signature.replace('\\n', '')}\\n{raw_string}\\n\\n"
+                    cleaned_function_name = function_name.replace('\n', '')
+                    cleaned_type_signature = type_signature.replace('\n', '')
+                    tmp = f"{cleaned_function_name} :: {cleaned_type_signature}\n{raw_string}\n\n"
                     if tmp not in local_functions_prompt:
                         local_functions_prompt += tmp
+
 
             local_functions_prompt += "```"
 
@@ -2084,3 +2089,93 @@ class QueryService:
                 unique_imports.append(stmt)
 
         return unique_imports
+    
+    def get_types_by_module(self, module_id: int) -> List[DBType]:
+        """
+        Get all types associated with a specific module.
+
+        Args:
+            module_id: The ID of the module
+
+        Returns:
+            List of DBType instances associated with the module
+        """
+        # Get the module by ID (you can also use `module_name` if you need to filter by name)
+        module = self.db.query(DBModule).filter(DBModule.id == module_id).first()
+
+        if module:
+            # If the module exists, fetch the associated types
+            return module.types  # This uses the relationship defined earlier: DBModule.types
+        else:
+            return []
+        
+    def get_classes_by_module(self, module_id: int) -> List[DBType]:
+        """
+        Get all classes associated with a specific module.
+
+        Args:
+            module_id: The ID of the module
+
+        Returns:
+            List of DBType instances associated with the module
+        """
+        # Get the module by ID (you can also use `module_name` if you need to filter by name)
+        module = self.db.query(DBModule).filter(DBModule.id == module_id).first()
+
+        if module:
+            # If the module exists, fetch the associated types
+            return module.classes  # This uses the relationship defined earlier: DBModule.types
+        else:
+            return []
+    
+    def get_imports_by_module(self, module_id: int) -> List[DBImport]:
+        """
+        Get all imports associated with a specific module.
+
+        Args:
+            module_id: The ID of the module
+
+        Returns:
+            List of DBImport instances associated with the module
+        """
+        # Get the module by ID
+        module = self.db.query(DBModule).filter(DBModule.id == module_id).first()
+
+        if module:
+            # Return the related imports for the given module
+            return module.imports  # Uses the relationship: DBModule.imports
+        else:
+            return []  # Return an empty list if module is not found
+    
+    def get_instances_by_module(self, module_id: int) -> List[DBInstance]:
+        """
+        Get all instances associated with a specific module.
+
+        Args:
+            module_id: The ID of the module
+
+        Returns:
+            List of DBInstance instances associated with the module
+        """
+        # Get the module by ID
+        module = self.db.query(DBModule).filter(DBModule.id == module_id).first()
+
+        if module:
+            # Return the related instances for the given module
+            return module.instances  # Uses the relationship: DBModule.instances
+        else:
+            return []  # Return an empty list if module is not found
+        
+    def get_type_by_name(self, type_name: str) -> Optional[DBType]:
+
+        """
+        Get a type definition by name.
+
+        Args:
+            type_name: The name of the type
+
+        Returns:
+            DBType instance if found, None otherwise
+        """
+
+        return self.db.query(DBType).filter(DBType.name == type_name).first()

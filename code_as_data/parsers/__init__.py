@@ -39,7 +39,7 @@ def get_module_name(base_dir_path, path, to_replace=""):
         path.replace(base_dir_path, "")
         .replace(".hs.json", "")
         .replace(".hs.module_imports.json", "")
-        .replace(".hs.type-info.json", "")
+        .replace(".hs.type.typechecker.json", "")
         .replace(".hs.function_instance_mapping.json", "")
         .replace(".hs.function_code.json", "")
         .replace(".hs.types_code.json", "")
