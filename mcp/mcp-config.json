@@ -1,0 +1,214 @@
+{
+  "name": "code-analysis-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for code analysis using Qdrant and Azure OpenAI",
+  "baseUrl": "http://localhost:5000",
+  "tools": [
+    {
+      "name": "semantic_code_search",
+      "description": "Search for code based on semantic meaning",
+      "endpoint": "/api/semantic_code_search",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "The search query in natural language"
+        },
+        "filters": {
+          "type": "object",
+          "description": "Filters to apply to the search",
+          "optional": true
+        },
+        "k": {
+          "type": "integer",
+          "description": "Number of results to return",
+          "optional": true,
+          "default": 5
+        }
+      }
+    },
+    {
+      "name": "code_navigation",
+      "description": "Navigate code based on relationships",
+      "endpoint": "/api/code_navigation",
+      "parameters": {
+        "element_id": {
+          "type": "string",
+          "description": "ID of the starting element"
+        },
+        "navigation_type": {
+          "type": "string",
+          "description": "Type of navigation (dependencies, callers, related)",
+          "optional": true,
+          "default": "dependencies"
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth of navigation",
+          "optional": true,
+          "default": 1
+        }
+      }
+    },
+    {
+      "name": "find_usage_examples",
+      "description": "Find examples of how a code element is used",
+      "endpoint": "/api/find_usage_examples",
+      "parameters": {
+        "element_name": {
+          "type": "string",
+          "description": "Name of the element"
+        },
+        "element_type": {
+          "type": "string",
+          "description": "Type of the element (function, type, class)"
+        },
+        "module": {
+          "type": "string",
+          "description": "Module to search in",
+          "optional": true
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum number of examples to return",
+          "optional": true,
+          "default": 5
+        }
+      }
+    },
+    {
+      "name": "extract_domain_concepts",
+      "description": "Extract domain concepts from the codebase",
+      "endpoint": "/api/extract_domain_concepts",
+      "parameters": {
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of modules to analyze",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "generate_domain_model",
+      "description": "Generate a domain model from the codebase",
+      "endpoint": "/api/generate_domain_model",
+      "parameters": {
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of modules to analyze",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "analyze_code_quality",
+      "description": "Analyze code quality and suggest improvements",
+      "endpoint": "/api/analyze_code_quality",
+      "parameters": {
+        "code": {
+          "type": "string",
+          "description": "Code to analyze"
+        },
+        "context": {
+          "type": "object",
+          "description": "Context information",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "detect_code_patterns",
+      "description": "Detect common code patterns in the codebase",
+      "endpoint": "/api/detect_code_patterns",
+      "parameters": {
+        "module": {
+          "type": "string",
+          "description": "Module to analyze",
+          "optional": true
+        },
+        "pattern_type": {
+          "type": "string",
+          "description": "Type of pattern to detect",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "identify_performance_hotspots",
+      "description": "Identify performance hotspots in the codebase",
+      "endpoint": "/api/identify_performance_hotspots",
+      "parameters": {
+        "module": {
+          "type": "string",
+          "description": "Module to analyze",
+          "optional": true
+        },
+        "threshold": {
+          "type": "integer",
+          "description": "Complexity threshold for hotspots",
+          "optional": true,
+          "default": 7
+        }
+      }
+    },
+    {
+      "name": "analyze_algorithm_complexity",
+      "description": "Analyze the complexity of an algorithm",
+      "endpoint": "/api/analyze_algorithm_complexity",
+      "parameters": {
+        "function_id": {
+          "type": "string",
+          "description": "ID of the function to analyze"
+        }
+      }
+    }
+  ],
+  "resources": [
+    {
+      "name": "code_structure",
+      "description": "Access the code structure",
+      "uriTemplate": "/api/code_structure{?path}",
+      "parameters": {
+        "path": {
+          "type": "string",
+          "description": "Path within the code structure",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "domain_knowledge",
+      "description": "Access domain knowledge",
+      "uriTemplate": "/api/domain_knowledge{?concept}",
+      "parameters": {
+        "concept": {
+          "type": "string",
+          "description": "Domain concept to access",
+          "optional": true
+        }
+      }
+    },
+    {
+      "name": "performance_metrics",
+      "description": "Access performance metrics",
+      "uriTemplate": "/api/performance_metrics{?module,function}",
+      "parameters": {
+        "module": {
+          "type": "string",
+          "description": "Module to get metrics for",
+          "optional": true
+        },
+        "function": {
+          "type": "string",
+          "description": "Function to get metrics for",
+          "optional": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# Core dependencies
+flask==2.3.3
+gunicorn==21.2.0
+python-dotenv==1.0.0
+
+# Vector database
+qdrant-client==1.6.4
+
+# Azure OpenAI
+openai==1.6.1
+azure-identity==1.14.0
+
+# Database access
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# Utilities
+numpy==1.24.3
+pydantic==2.4.2
