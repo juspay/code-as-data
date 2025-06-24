@@ -35,6 +35,7 @@ setup(
         "SQLAlchemy",
         "tqdm",
         "typing_extensions",
+        "neo4j",
     ],
     python_requires=">=3.6",
 )

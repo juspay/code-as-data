@@ -9,6 +9,9 @@ code_as_data.egg-info/top_level.txt
 code_as_data/db/__init__.py
 code_as_data/db/connection.py
 code_as_data/db/models.py
+code_as_data/db/neo4j_connection.py
+code_as_data/ingestion/__init__.py
+code_as_data/ingestion/neo4j_ingest.py
 code_as_data/models/__init__.py
 code_as_data/models/class_model.py
 code_as_data/models/function_model.py

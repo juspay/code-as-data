@@ -28,3 +28,4 @@ six
 SQLAlchemy
 tqdm
 typing_extensions
+neo4j
