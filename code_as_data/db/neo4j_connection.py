@@ -16,7 +16,7 @@ class Neo4jConnection:
     def get_driver(cls):
         if cls._driver is None:
             try:
-                cls._driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+                cls._driver = GraphDatabase.driver(NEO4J_URI)
                 cls._driver.verify_connectivity()
                 print(f"Successfully connected to Neo4j at {NEO4J_URI}")
             except exceptions.ServiceUnavailable as e:

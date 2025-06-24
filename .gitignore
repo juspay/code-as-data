@@ -5,3 +5,5 @@ venv
 postgres-data
 .vscode
 build/
+tmp/
+*.json
