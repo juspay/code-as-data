@@ -18,6 +18,8 @@ code_as_data/models/function_model.py
 code_as_data/models/import_model.py
 code_as_data/models/instance_model.py
 code_as_data/models/type_model.py
+code_as_data/networkx_adapter/__init__.py
+code_as_data/networkx_adapter/networkx.py
 code_as_data/parsers/__init__.py
 code_as_data/parsers/class_parser.py
 code_as_data/parsers/function_parser.py
