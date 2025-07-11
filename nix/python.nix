@@ -90,8 +90,6 @@ in
       apps.test.program = "${lib.getExe' self'.packages.default "pytest"}";
 
       devShells = {
-        default = self'.devShells.uv2nix;
-
         uv2nix = pkgs.mkShell {
           inputsFrom = [
             config.pre-commit.devShell
