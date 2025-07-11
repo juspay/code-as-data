@@ -5,3 +5,9 @@ venv
 postgres-data
 .vscode
 build/
+result-man
+result
+.pre-commit-config.yaml
+code_as_data.egg-info
+data/code-as-data
+.direnv
