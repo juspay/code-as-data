@@ -1,0 +1,100 @@
+
+function_name: OpenAIIntraction:requestGPT
+
+required_to_reach_this_function:
+  db:
+    - A valid database connection must be configured.
+    - The tables 'integration_tracker', 'gateway_document_text', and 'integration_checklists' must exist.
+  env:
+    - Database connection configuration (e.g., EulerDbConf).
+    - At least one set of LLM API configurations must be valid and present (e.g., GPT_PROXY_BASE_URL, GPT_PROXY_API_KEY, etc.).
+  external_services:
+    - A running and accessible database instance.
+    - Network access to the configured LLM API endpoint.
+    - The `pdftotext` utility must be installed on the system running the application.
+  notes:
+    - This function is triggered by calling the `generateCheckList` endpoint with valid PDF file data. The content of the PDF is parsed and used to build the request payload for the LLM.
+
+scenario_matrix:
+  - when:
+      conditions:
+        - The configured LLM API is available and responsive.
+        - The API key/headers are valid for the LLM API.
+        - The LLM API returns an HTTP 200 status with a valid, expected JSON body containing text choices.
+      config_flags: []
+      env: []
+      input_values:
+        - The constructed LLM request payload is valid.
+    then_expect:
+      behavior: "The function successfully makes a POST request, receives a 200 OK, decodes the response, and returns a `Right` value containing the text from the first choice."
+      observables:
+        - An external POST request is made to the configured LLM URL.
+        - The overall API call (starting from `generateCheckList`) succeeds.
+        - The final response contains the text parsed from the LLM response, potentially modified by `Common:parseCodeBlock`.
+
+  - when:
+      conditions:
+        - The configured LLM API returns an HTTP 429 "Too Many Requests" status code, indicating a rate limit has been hit.
+      config_flags: []
+      env: []
+      input_values: []
+    then_expect:
+      behavior: "The function blocks the thread for 30 seconds and then recursively calls itself, retrying the POST request. The final outcome depends on the success of the retried request."
+      observables:
+        - A significant delay (at least 30 seconds) is added to the total response time of the API call.
+        - Logs will show an initial POST request receiving a 429, followed by another attempt after the delay.
+
+  - when:
+      conditions:
+        - The configured LLM API returns an HTTP error status other than 200 or 429 (e.g., 401 Unauthorized, 403 Forbidden, 500 Server Error).
+      config_flags: []
+      env: []
+      input_values:
+        - This can be triggered by providing an invalid API key in the environment variables (e.g., `GPT_PROXY_API_KEY`).
+    then_expect:
+      behavior: "The function immediately fails and returns a `Left` value containing the received HTTP status code and message. The request is not retried."
+      observables:
+        - The overall API call fails.
+        - The API response body indicates an error from the downstream service, including the specific HTTP status code (e.g., 401).
+
+  - when:
+      conditions:
+        - The LLM API returns an HTTP 200 OK, but the response body is malformed or does not match the expected JSON structure (e.g., it's empty, not JSON, or missing the 'choices' field).
+      config_flags: []
+      env: []
+      input_values: []
+    then_expect:
+      behavior: "The function fails to decode the response body and returns a `Left` value with a (400, 'OPEN_API_DECODE_ERROR') tuple."
+      observables:
+        - The overall API call fails.
+        - The API response body contains a message indicating an 'OPEN_API_DECODE_ERROR'.
+        - Logs may show a successful HTTP 200 from the external service, followed by a local decoding failure.
+
+  - when:
+      conditions:
+        - The external LLM API is slow to respond, exceeding the configured timeout.
+      config_flags: []
+      env:
+        -  : This environment variable controls the timeout in seconds. Setting it to a low value (e.g., '1') will make this scenario easy to test.
+      input_values: []
+    then_expect:
+      behavior: "The HTTP client manager aborts the request, causing the function to fail and return a `Left` value representing the timeout error."
+      observables:
+        - The overall API call fails with a timeout-related error message.
+        - The response time will be approximately the value set in OAI_REQUEST_TIMEOUT.
+
+  - when:
+      conditions:
+        - The LLM API successfully returns text that does NOT contain a markdown code block (e.g., no ```).
+      config_flags: []
+      env: []
+      input_values: []
+    then_expect:
+      behavior: "The function succeeds, and the descendant `Common:parseCodeBlock` returns the original text from the LLM since there is no code block to extract."
+      observables:
+        - The overall API call succeeds, and the response body contains the raw text returned by the LLM.
+
+qa_notes:
+  - To reliably test these scenarios, the external LLM API should be mocked. This allows the mock service to return specific HTTP status codes (200, 429, 401, 500) and response bodies (valid JSON, malformed JSON, empty) on demand.
+  - The most critical configuration variables influencing this function's behavior are the LLM API credentials/URLs (`GPT_PROXY_*`, `GEMINI_*`, etc.) and the `OAI_REQUEST_TIMEOUT` environment variable.
+  - The content of the initial PDF file sent to `generateCheckList` indirectly affects this function, as it determines the prompt/payload sent to the LLM, which in turn can influence the LLM's response content and structure.
