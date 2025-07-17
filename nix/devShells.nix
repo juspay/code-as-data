@@ -1,6 +1,8 @@
 { inputs, ... }:
 {
   perSystem = { self', pkgs, ... }:
+    # TODO: A clean implementation or reliance on direnv once below is discussed
+    # <https://github.com/juspay/code-as-data/pull/4#discussion_r2212727607>
     let
       envFile = builtins.readFile (inputs.self + /.env);
       rawLines = builtins.split "\n" envFile;

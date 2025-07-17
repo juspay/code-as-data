@@ -1,3 +1,6 @@
+# NOTE: This module is temporary. It will soon be upstreamed to a dedicated flake-parts module,
+# and replaced with a minimal Nix file, similar to how haskell-flake is used in other repositories.
+# For progress and discussion, see: https://github.com/juspay/python-nix-template/issues/2
 { inputs, ... }:
 let
   inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
