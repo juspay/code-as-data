@@ -5,3 +5,4 @@ venv
 postgres-data
 .vscode
 build/
+**/lib
