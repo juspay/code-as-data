@@ -246,3 +246,120 @@ Do not hallucinate child function names — take them from the provided metadata
 Focus especially on when and why a child function is called, based on parent logic.
 Feel free to reword, clarify, or merge preconditions/postconditions from children where helpful
 """
+
+summarize_prompt = """
+You are assisting with automated test generation for a Haskell backend API.
+
+We are currently analyzing the function `{current_function}` in the call path to a recently modified function.  
+The goal is to understand what test setup (DB, environment, auth, and state) is required for this function to execute successfully, considering only the parts of the system it immediately depends on.
+
+---
+
+### Context:
+
+This function may invoke many **descendant functions**, excluding the next function on the main execution path: `{next_function}`.  
+The following metadata has been collected for all its **relevant descendants (excluding `{next_function}` and its children)**.
+
+Please analyze this metadata and summarize **only the critical setup information** needed for this function to work *in the context of an API test*.
+
+---
+
+### Input Metadata:
+{metainfo}
+
+Each block includes:
+- function name
+- behavior summary
+- preconditions
+- postconditions
+- state dependencies
+- side effects
+---
+
+### Your Job:
+
+Aggregate the metadata into a **single summarized test setup context** for the current function.
+
+Your summary must:
+- Combine overlapping preconditions logically (remove duplicates)
+- Merge and deduplicate DB/env dependencies
+- Convert technical descriptions into clear test setup requirements
+- Only include behavior relevant for setting up the test (no implementation detail)
+
+---
+
+### Output Format:
+Return a single valid JSON object with this structure:
+
+```json
+{{
+  "function_name": "current_function",
+  "behavior_summary": "<one-line purpose of the function in test terms>",
+  "preconditions": [
+    "List of things that must exist before calling this function (e.g. DB rows, request structure, auth)"
+  ],
+  "postconditions": [
+    "List of effects visible after function executes successfully"
+  ],
+  "state_dependencies": {{
+    "db": ["table or entity names or descriptions"],
+    "env": ["environment/config values if any"],
+    "redis": ["keys or patterns if applicable"]
+  }},
+  "side_effects": [
+    "Descriptions of DB writes, external calls, or major internal state changes"
+  ]
+}}
+"""
+
+final_prompt = """
+You are helping QA test a backend Haskell function in a Servant-based API. Your goal is to help them understand **what configurations, input values, or environment states will change the behavior** of this function.
+
+The function `{function_name}` is reached via this call path:
+
+> {api_path}
+
+The following metadata is available:
+
+---
+
+## Aggregated upstream metadata (everything required to reach this function):
+
+{metainfo}
+
+## Metadata for this function and its descendants:
+
+{currmetainfo}
+
+---
+
+### Your Task:
+
+Generate a **YAML-based functional test specification** with the following structure:
+
+```yaml
+function_name: {function_name}
+
+required_to_reach_this_function:
+  db: []
+  env: []
+  external_services: []
+  notes: []
+
+scenario_matrix:
+  - when:
+      conditions: []       # Conditions that trigger this behavior
+      config_flags: []     # Optional flags or toggles
+      env: []              # Relevant env vars if any
+      input_values: []     # Key input triggers or values
+    then_expect:
+      behavior: ""         # What this function will do
+      observables: []      # What QA can observe in logs, response, or side effects
+
+qa_notes: []
+```
+
+Only fill what is necessary. If no config/env matters, focus only on input_values or defaults.
+
+Be specific, realistic, and align your logic strictly with the metadata.
+"""

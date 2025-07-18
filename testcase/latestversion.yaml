@@ -1,0 +1,65 @@
+
+function_name: Database.IntegrationTracker:findOneIntegrationTrackerbyId
+
+required_to_reach_this_function:
+  db:
+    - An accessible database instance is running.
+    - The database contains the 'IntegrationTrackerT' and 'gpt_response' tables with the correct schema.
+  env:
+    - Environment variables for the database connection must be correctly set for 'getEulerDbConf' to succeed.
+  external_services: []
+  notes:
+    - The function is reached via an API call that provides a 'documentDataId', which is used as the lookup key.
+
+scenario_matrix:
+  - when:
+      conditions:
+        - A record exists in the 'IntegrationTrackerT' table with an ID that matches the input 'documentDataId'.
+      config_flags: []
+      env:
+        - Valid database connection configuration.
+      input_values:
+        - A 'documentDataId' that corresponds to an existing record in 'IntegrationTrackerT'.
+    then_expect:
+      behavior: "The function executes a database query, finds the record, and returns 'Just record' to its caller ('findOneIntegrationTrackerDomainbyId')."
+      observables:
+        - The overall API call succeeds.
+        - A new record is created in the 'gpt_response' table.
+        - The API returns a JSON object representing the new 'gpt_response' record.
+
+  - when:
+      conditions:
+        - No record exists in the 'IntegrationTrackerT' table with an ID matching the input 'documentDataId'.
+      config_flags: []
+      env:
+        - Valid database connection configuration.
+      input_values:
+        - A 'documentDataId' that does not exist in the 'IntegrationTrackerT' table (e.g., a random or non-existent ID).
+    then_expect:
+      behavior: "The function executes a database query, finds no matching record, and returns 'Nothing' to its caller."
+      observables:
+        - The upstream caller ('findOneIntegrationTrackerDomainbyId') receives 'Nothing' and throws an exception, as documented in its postconditions.
+        - The final API response is an HTTP 500 error.
+        - Logs may indicate a "record not found" or similar business logic error.
+
+  - when:
+      conditions:
+        - The application cannot connect to the database or execute the query successfully.
+      config_flags: []
+      env:
+        - Invalid database connection details (e.g., wrong host, port, credentials).
+      input_values:
+        - Any 'documentDataId'.
+    then_expect:
+      behavior: "The function attempts to query the database, fails due to a connection/query error, and returns 'Nothing' as per its postconditions."
+      observables:
+        - This case is identical to the 'Record Not Found' scenario from the API consumer's perspective.
+        - The upstream caller receives 'Nothing' and throws an exception.
+        - The final API response is an HTTP 500 error.
+        - Application logs will show a database connection or query execution error, which distinguishes this case from the 'Record Not Found' scenario.
+
+qa_notes:
+  - The direct output of this function ('Just record' vs. 'Nothing') is not directly observable in the final API response. Its behavior is interpreted by its caller, `findOneIntegrationTrackerDomainbyId`.
+  - Both a missing record and a database error cause this function to return 'Nothing'. This means both scenarios will result in an HTTP 500 error from the API endpoint.
+  - To differentiate between a "record not found" failure and a "database connection" failure, QA must inspect the service logs. The former is a data state issue, while the latter is an environment or infrastructure issue.
+  - The key input to test is the existence (or non-existence) of a record in the 'IntegrationTrackerT' table matching the 'documentDataId' from the API request.
