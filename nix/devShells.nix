@@ -1,40 +1,19 @@
-{ inputs, ... }:
 {
-  perSystem = { self', pkgs, ... }:
-    # TODO: A clean implementation or reliance on direnv once below is discussed
-    # <https://github.com/juspay/code-as-data/pull/4#discussion_r2212727607>
-    let
-      envFile = builtins.readFile (inputs.self + /.env);
-      rawLines = builtins.split "\n" envFile;
+  perSystem = { self', pkgs, ... }: {
+    devShells.default = pkgs.mkShell {
+      inputsFrom = [
+        self'.devShells.uv2nix
+      ];
 
-      # Pre-filter to only valid env lines
-      envLines = builtins.filter
-        (line:
-          builtins.isString line &&
-          line != "" &&
-          !(builtins.match "^[ \t]*#.*" line != null) && # Not a comment
-          (builtins.match ".*=.*" line != null)            # Contains =
-        )
-        rawLines;
-      envVars = builtins.listToAttrs (map
-        (line:
-          let
-            parts = builtins.split "=" line;
-            key = builtins.elemAt parts 0;
-            value = builtins.elemAt parts 2;
-          in
-          { name = key; value = value; })
-        envLines);
-    in
-    {
-      devShells.default = (pkgs.mkShell envVars // {
-        importsFrom = [
-          self'.devShells.uv2nix
-        ];
-
-        shellHook = ''
-          echo "Welcome to the Code as Data development shell!"
-        '';
-      });
+      DB_HOST = "localhost";
+      DB_MAX_OVERFLOW = 20;
+      DB_NAME = "code_as_data";
+      DB_PASSWORD = "postgres";
+      DB_POOL_RECYCLE = 1800;
+      DB_POOL_SIZE = 10;
+      DB_POOL_TIMEOUT = 30;
+      DB_PORT = 18908;
+      DB_USER = "postgres";
     };
+  };
 }

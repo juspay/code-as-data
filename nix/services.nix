@@ -3,7 +3,7 @@
   imports = [
     inputs.process-compose-flake.flakeModule
   ];
-  perSystem = { config, lib, ... }:
+  perSystem = { config, ... }:
     {
       process-compose."code-as-data" = {
         imports = [
@@ -12,7 +12,7 @@
 
         services.postgres."code-as-data" = {
           enable = true;
-          port = lib.toInt config.devShells.default.DB_PORT; # Picked from .env
+          port = config.devShells.default.DB_PORT;
           initialScript.after = # sql
             ''
               CREATE ROLE postgres WITH
