@@ -5,6 +5,8 @@
         self'.devShells.uv2nix
       ];
 
+      packages = [ pkgs.just ];
+
       DB_HOST = "localhost";
       DB_MAX_OVERFLOW = 20;
       DB_NAME = "code_as_data";
