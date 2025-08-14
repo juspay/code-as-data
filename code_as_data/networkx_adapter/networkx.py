@@ -36,8 +36,6 @@ class NetworkxAdapter:
         def add_call_edges(source_func: Function):
             source_id = f"{source_func.module_name}:{source_func.function_name}"
             for called in source_func.functions_called:
-                if not called.module_name or not called.function_name:
-                    continue
                 target_id = f"{called.module_name}:{called.function_name}"
                 self.G.add_edge(source_id, target_id, type="calls")
 
@@ -51,33 +49,34 @@ class NetworkxAdapter:
                 self.G.add_edge(parent_id, called_id, type="calls")
 
             for _, where_func in source_func.where_functions.items():
-                where_id = f"{where_func.module_name}:{where_func.function_name}"
+                where_id = f"{parent_id}.{where_func.function_name}"
                 self.G.add_node(where_id, type="where_function")
                 self.G.add_edge(parent_id, where_id, type="where")
                 traverse_where_functions(where_func, where_id)
 
         def handle_instances_used(source_func: Function):
             source_id = f"{source_func.module_name}:{source_func.function_name}"
-            for instance_sig in source_func.instances_used or []:
+            for instance_sig in list(set(source_func.instances_used)) or []:
                 for inst_module, instances in all_instances.items():
                     for inst_obj in instances:
                         if instance_sig == inst_obj.instance_signature:
                             if not inst_obj:
                                 continue
                             inst_id = f"{inst_module}:{instance_sig}"
-                            self.G.add_node(inst_id, type="instance", label=instance_sig)
+                            if not self.G.has_node(inst_id):
+                                self.G.add_node(inst_id, type="instance", label=instance_sig)
                             self.G.add_edge(source_id, inst_id, type="uses_instance")
                             for fn in inst_obj.functions:
                                 fn_id = f"{fn.module_name}:{fn.function_name}"
-                                self.G.add_node(fn_id, type="function", label=fn.function_name)
+                                if not self.G.has_node(fn_id):
+                                    self.G.add_node(fn_id, type="function", label=fn.function_name)
                                 self.G.add_edge(inst_id, fn_id, type="instance_defines")
                                 traverse_where_functions(fn, fn_id)
 
         for mod_name, functions in all_functions.items():
             for fn in functions:
                 fn_id = f"{mod_name}:{fn.function_name}"
-                self.G.add_node(
-                    fn_id,
+                attrs = dict(
                     label=fn.function_name,
                     node_type="Function",
                     function_signature=fn.function_signature,
@@ -86,6 +85,10 @@ class NetworkxAdapter:
                     line_number_start=fn.line_number_start,
                     line_number_end=fn.line_number_end,
                 )
+                if not self.G.has_node(fn_id):
+                    self.G.add_node(fn_id, **attrs)
+                else:
+                    self.G.nodes[fn_id].update(attrs)
                 add_call_edges(fn)
                 traverse_where_functions(fn, fn_id)
                 handle_instances_used(fn)
@@ -162,27 +165,30 @@ class NetworkxAdapter:
 
         return deps
 
-    def build_type_dependency_graph(self, types: List[Type]) -> nx.DiGraph:
-
+    def build_type_dependency_graph(self, types:list[Type]):
         for t in types:
             type_id = f"{t.module_name}:{t.type_name}"
-            self.G.add_node(
-                type_id,
-                node_type="Type",
-                code_string=t.raw_code,
-                src_loc=t.src_loc,
-                line_number_start=t.line_number_start,
-                line_number_end=t.line_number_end,
-            )
+            attrs = {
+                "node_type": "Type",
+                "code_string": t.raw_code,
+                "src_loc": t.src_loc,
+                "line_number_start": t.line_number_start,
+                "line_number_end": t.line_number_end,
+            }
+            self.G.add_node(type_id, **attrs)
+            self.G.nodes[type_id].update(attrs)
 
             for constructor_name, fields in t.cons.items():
                 constructor_id = f"{type_id}.{constructor_name}"
                 self.G.add_node(constructor_id, type="constructor", belongs_to=type_id)
+                self.G.nodes[constructor_id].update({"type":"constructor", "belongs_to": type_id})
                 self.G.add_edge(type_id, constructor_id, label="DECLARES")
 
                 for field in fields:
                     field_id = f"{constructor_id}.{field.field_name}"
-                    self.G.add_node(field_id, type="field", field_name=field.field_name)
+                    field_attrs = {"type":"field", "field_name": field.field_name}
+                    self.G.add_node(field_id, **field_attrs)
+                    self.G.nodes[field_id].update(field_attrs)
                     self.G.add_edge(constructor_id, field_id, label="HAS_FIELD")
 
                     deps = self.extract_dependent_type_ids(field.field_type.structure)
@@ -196,14 +202,15 @@ class NetworkxAdapter:
         for class_list in self.classes_by_module.get(module_name, []):
             for clas in class_list:
                 if isinstance(clas, Class):
-                    self.G.add_node(
-                        clas.id,
-                        node_type="Class",
-                        code_string=clas.class_definition,
-                        src_loc=clas.src_loc,
-                        line_number_start=clas.line_number_start,
-                        line_number_end=clas.line_number_end,
-                    )
+                    attrs = {
+                        "node_type": "Class",
+                        "code_string": clas.class_definition,
+                        "src_loc": clas.src_loc,
+                        "line_number_start": clas.line_number_start,
+                        "line_number_end": clas.line_number_end,
+                    }
+                    self.G.add_node(clas.id, **attrs)
+                    self.G.nodes[clas.id].update(attrs)
 
 
     def construct(self):
