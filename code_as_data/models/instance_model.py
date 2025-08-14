@@ -7,6 +7,7 @@ class Instance(BaseModel):
     """Model representing an instance."""
 
     instanceDefinition: str
+    instance_id: str
     module_name: str
     src_loc: str
     instance_signature: str

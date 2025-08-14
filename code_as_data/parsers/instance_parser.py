@@ -110,7 +110,40 @@ class InstanceParser:
                 i["functions"] = functions
                 i["src_loc"] = i.get("instanceLocation", "")
                 i["module_name"] = module_name
-                i["instance_signature"] = i.get("instanceType", "")
+
+                def remove_qualified_prefixes(input_string):
+                    """
+                    Removes any qualified part (prefix followed by a dot) from words in a string.
+                    
+                    Examples:
+                    - "API.TransactionSync" becomes "TransactionSync"
+                    - "Package.SubPackage.Class" becomes "Class"
+                    - "Namespace.Type" becomes "Type"
+                    
+                    Args:
+                        input_string (str): The input string to process
+                        
+                    Returns:
+                        str: The string with qualified prefixes removed
+                    """
+                    # Split the string into words
+                    words = input_string.split()
+                    
+                    # Process each word to remove qualified prefixes
+                    processed_words = []
+                    for word in words:
+                        # Take only the part after the last dot if any dots exist
+                        if "." in word:
+                            processed_words.append(word.split(".")[-1])
+                        else:
+                            processed_words.append(word)
+                    
+                    # Join the processed words back into a string
+                    return " ".join(processed_words)
+
+                i["instance_signature"] = (i.get("instanceType", ""))
+                i["instance_id"] = remove_qualified_prefixes(i.get("instanceType", ""))
+
 
                 self.modules_vs_instances[module_name].append(Instance(**i))
 
