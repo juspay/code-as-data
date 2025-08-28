@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, field_validator, Field as PydanticField, ConfigDict
-
+import json
 
 class TypeOfType(str, Enum):
     """Enum representing different types of type definitions."""
@@ -12,6 +12,11 @@ class TypeOfType(str, Enum):
     NEWTYPE = "newtype"
     CLASS = "class"
     INSTANCE = "instance"
+    # ── Rust-only kinds (NEW) ─────────────────────────────────────────────────────
+    STRUCT      = "struct"
+    ENUM        = "enum"
+    UNION       = "union"
+    TYPE_ALIAS  = "type_alias"
 
     @classmethod
     def resolve_value(cls, value: str) -> "TypeOfType":
@@ -27,6 +32,17 @@ class TypeOfType(str, Enum):
             return cls.CLASS
         elif value == "instance":
             return cls.INSTANCE
+
+        # ---------- Rust -------------
+        elif value == "struct":
+            return cls.STRUCT
+        elif value == "enum":
+            return cls.ENUM
+        elif value == "union":
+            return cls.UNION
+        elif value in {"type_alias", "alias"}:
+            return cls.TYPE_ALIAS
+
         return cls.DATA
 
 
@@ -441,20 +457,40 @@ class Type(BaseModel):
     raw_code: str
     src_loc: str
 
+    # ---------- Rust additions ------------------------------------------
+    fully_qualified_path: Optional[str] = None
+    fields:               Optional[List[Dict[str, Any]]] = None   # as dumped by extractor
+    visibility:           Optional[str] = None                    # "pub", "pub(crate)", …
+    doc_comments:         Optional[str] = None
+    attributes:           Optional[List[Dict[str, Any]]] = None
+    crate_name:           Optional[str] = None
+    module_path:          Optional[str] = None
+    type_kind:            Optional[str] = None
+
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True, from_attributes=True, populate_by_name=True
     )
 
     @property
     def id(self) -> str:
-        """Generate a unique ID for the type."""
-        return f"{self.module_name}:{self.type_name}"
+        """Generate a unique ID for the type.
+
+        • Rust → use fully-qualified path if present
+        • fallback  → module_name:type_name (Haskell)
+        """
+        return self.fully_qualified_path or f"{self.module_name}:{self.type_name}"
 
     def get_prompt(self) -> str:
-        """Return the raw code for prompting."""
-        return self.raw_code
+        """
+        Return the raw code for prompting.
+        Chooses ```rust or ```haskell fence heuristically.
+        """
+        lang = "rust" if self.fully_qualified_path else "haskell"
+        return f"```{lang}\n{self.raw_code}\n```"
 
     def __init__(self, **data):
+        from .type_model import TypeOfType
         # Determine type based on data_constructors_list
         if "typeKind" in data:
             if len(data.get("data_constructors_list", [])) > 1:
@@ -475,4 +511,23 @@ class Type(BaseModel):
                 ]
             data["cons"] = cons
 
+        # ---- Rust STRUCT / ENUM constructor extraction -----------------
+        if data.get("fields") and not data.get("cons"):
+            data["cons"] = {
+                data["type_name"]: [
+                    TypeField.from_dict(f["name"], f["type"])
+                    for f in data["fields"]
+                    if isinstance(f, dict) and "name" in f
+                ]
+            }
+
+        if data.get("type_kind") and not data.get("type"):
+            tk = (data["type_kind"] or "").lower()
+            if tk in {"struct", "enum", "union", "type_alias"}:
+                from .type_model import TypeOfType
+                data["type"] = TypeOfType.resolve_value(tk)
+
+
         super().__init__(**data)
+
+ComplexType.model_rebuild()

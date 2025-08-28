@@ -14,10 +14,13 @@ def list_files_recursive(path: str, pattern: str) -> List[str]:
     Returns:
         List of file paths
     """
+
+    if isinstance(pattern, str):
+        pattern = [pattern]
     result = []
     for root, _, files in os.walk(path):
         for file in files:
-            if pattern in file:
+            if any(p in file for p in pattern):
                 result.append(os.path.join(root, file))
     return result
 
@@ -55,6 +58,16 @@ def get_module_name(base_dir_path, path, to_replace=""):
         .replace("dist/", "")
         .replace("build/autogen/", "")
     )
+
+    # ── RUST ── crates/<crate>/src/<path>.json  →  <crate>::<path>
+    if path.endswith(".json") and "/crates/" in path and ".hs." not in path:
+        path = path.replace(".json", "")
+        # trim “…/crates/” and first “src/” if present
+        path = path.split("/crates/")[-1]
+        path = path.replace("/src/", "/")
+        # analytics/lambda_utils  -> analytics::lambda_utils
+        return path.replace("/", "::")
+
     patterns = [
         ("src/", "src/"),
         ("src-generated/", "src-generated/"),

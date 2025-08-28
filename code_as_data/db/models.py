@@ -1,6 +1,18 @@
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, Table, JSON, Boolean
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from .connection import Base
+import os
+
+# Use JSONB for PostgreSQL, JSON for other databases (like SQLite for testing)
+def get_json_type():
+    """Return JSONB for PostgreSQL, JSON for other databases."""
+    db_url = os.getenv('DATABASE_URL', '')
+    if 'postgresql' in db_url or 'postgres' in db_url:
+        return JSONB
+    return JSON
+
+JSONType = get_json_type()
 
 # Association table for many-to-many relationships
 function_dependency = Table(
@@ -34,6 +46,12 @@ class Module(Base):
     classes = relationship("Class", back_populates="module")
     instances = relationship("Instance", back_populates="module")
 
+    # ---------- Rust additions ----------
+    impl_blocks = relationship("ImplBlock",                back_populates="module")   # Rust specific
+    constants   = relationship("Constant",                 back_populates="module")   # Rust specific
+    trait_sigs  = relationship("TraitMethodSignature",     back_populates="module")   # Rust specific
+    traits = relationship("Trait", back_populates="module")
+
 
 class FunctionCalled(Base):
     """Table representing called functions."""
@@ -49,6 +67,19 @@ class FunctionCalled(Base):
     function_name = Column(Text)
     function_signature = Column(Text)
     type_enum = Column(Text)
+
+    # ---------- Rust additions ----------
+    fully_qualified_path = Column(String(1024))                       # Rust specific
+    is_method            = Column(Boolean, default=False)             # Rust specific
+    receiver_type        = Column(JSONType)                           # Rust specific
+    input_types          = Column(JSONType)                           # Rust specific
+    output_types         = Column(JSONType)                           # Rust specific
+    line_number          = Column(Integer)                            # Rust specific
+    column_number        = Column(Integer)                            # Rust specific
+    origin_crate         = Column(String(255))                        # Rust specific
+    origin_module        = Column(String(512))                        # Rust specific
+    call_type            = Column(String(32))                         # Rust specific
+
 
     # Relationships
     function_id = Column(
@@ -85,6 +116,24 @@ class Function(Base):
     instances_used = Column(Text, nullable=True)
     module_id = Column(Integer, ForeignKey("module.id"))
 
+
+    # ---------- Rust additions ----------
+    fully_qualified_path = Column(String(1024), index=True)          # Rust specific
+    is_method            = Column(Boolean, default=False)            # Rust specific
+    self_type            = Column(JSONType)                          # Rust specific
+    input_types          = Column(JSONType)                          # Rust specific
+    output_types         = Column(JSONType)                          # Rust specific
+    types_used           = Column(JSONType)                          # Rust specific
+    literals_used        = Column(JSONType)                          # Rust specific
+    methods_called       = Column(JSONType)                          # Rust specific
+    visibility           = Column(String(64))                        # Rust specific
+    doc_comments         = Column(Text)                              # Rust specific
+    attributes           = Column(JSONType)                          # Rust specific
+    crate_name           = Column(String(255))                       # Rust specific
+    module_path          = Column(String(512))                       # Rust specific
+
+
+
     # Input/output metadata
     function_input = Column(JSON, nullable=True)
     function_output = Column(JSON, nullable=True)
@@ -112,6 +161,8 @@ class Function(Base):
         secondaryjoin=id == function_dependency.c.callee_id,
         backref="called_by",
     )
+    impl_block_id = Column(Integer, ForeignKey("impl_block.id"))           # Rust specific
+    impl_block    = relationship("ImplBlock", back_populates="methods")    # Rust specific
 
 
 class WhereFunction(Base):
@@ -125,6 +176,20 @@ class WhereFunction(Base):
     raw_string = Column(Text, nullable=True)
     src_loc = Column(String(512), nullable=True)
     parent_function_id = Column(Integer, ForeignKey("function.id"))
+
+
+    # ---------- Rust additions ----------
+    fully_qualified_path = Column(String(1024))               # Rust specific
+    input_types          = Column(JSONType)                   # Rust specific
+    output_types         = Column(JSONType)                   # Rust specific
+    types_used           = Column(JSONType)                   # Rust specific
+    literals_used        = Column(JSONType)                   # Rust specific
+    methods_called       = Column(JSONType)                   # Rust specific
+    is_method            = Column(Boolean, default=False)     # Rust specific
+    self_type            = Column(JSONType)                   # Rust specific
+    visibility           = Column(String(64))                 # Rust specific
+    doc_comments         = Column(Text)                       # Rust specific
+    attributes           = Column(JSONType)                   # Rust specific
 
     # Relationships
     parent_function = relationship("Function", back_populates="where_functions")
@@ -158,6 +223,10 @@ class Import(Base):
     line_number_end = Column(Integer)
     module_id = Column(Integer, ForeignKey("module.id"))
 
+    # ---------- Rust additions ----------
+    path       = Column(Text)         # Rust specific  (raw 'use …' string)
+    visibility = Column(String(64))   # Rust specific
+
     # Relationships
     module = relationship("Module", back_populates="imports")
 
@@ -175,6 +244,16 @@ class Type(Base):
     line_number_start = Column(Integer)
     line_number_end = Column(Integer)
     module_id = Column(Integer, ForeignKey("module.id"))
+
+    # ---------- Rust additions ----------
+    fully_qualified_path = Column(String(1024))           # Rust specific
+    fields               = Column(JSONType)               # Rust specific
+    visibility           = Column(String(64))             # Rust specific
+    doc_comments         = Column(Text)                   # Rust specific
+    attributes           = Column(JSONType)               # Rust specific
+    crate_name           = Column(String(255))            # Rust specific
+    module_path          = Column(String(512))            # Rust specific
+
 
     # Relationships
     module = relationship("Module", back_populates="types")
@@ -266,3 +345,106 @@ class InstanceFunction(Base):
     # Relationships
     instance = relationship("Instance", back_populates="instance_functions")
     function = relationship("Function", back_populates="instance_functions")
+
+
+class ImplBlock(Base):
+    __tablename__ = "impl_block"  # Rust specific
+
+    id = Column(Integer, primary_key=True)              # Rust specific
+    struct_name = Column(Text, index=True)              # Rust specific
+    struct_fqp = Column(Text, index=True)               # Rust specific
+    trait_name = Column(String(512), index=True)        # Rust specific
+    trait_fqp = Column(String(1024), index=True)        # Rust specific
+    src_location = Column(String(512))                  # Rust specific
+    line_number_start = Column(Integer)                 # Rust specific
+    line_number_end = Column(Integer)                   # Rust specific
+    crate_name = Column(String(255))                    # Rust specific
+    module_path = Column(String(512))                   # Rust specific
+    module_name = Column(String(512))                   # Rust specific
+    module_id = Column(Integer, ForeignKey("module.id"))# Rust specific
+    trait_id = Column(Integer, ForeignKey("trait.id"))  # Rust specific
+
+    module = relationship("Module", back_populates="impl_blocks")  # Rust specific
+    methods = relationship("Function", back_populates="impl_block")  # Rust specific
+    trait = relationship("Trait", back_populates="impl_blocks")    # Rust specific
+
+
+
+
+class Constant(Base):
+    __tablename__ = "constant"                        # Rust specific
+
+    id                   = Column(Integer, primary_key=True)                         # Rust specific
+    name                 = Column(String(255), index=True)                           # Rust specific
+    fully_qualified_path = Column(String(1024))                                      # Rust specific
+    const_type           = Column(JSONType)                                          # Rust specific
+    src_location         = Column(String(512))                                       # Rust specific
+    src_code             = Column(Text)                                              # Rust specific
+    line_number_start    = Column(Integer)                                           # Rust specific
+    line_number_end      = Column(Integer)                                           # Rust specific
+    crate_name           = Column(String(255))                                       # Rust specific
+    module_path          = Column(String(512))                                       # Rust specific
+    visibility           = Column(String(255))                                       # Rust specific
+    doc_comments         = Column(Text)                                              # Rust specific
+    attributes           = Column(JSONType)                                          # Rust specific
+    is_static            = Column(Boolean, default=False)                            # Rust specific
+    module_id            = Column(Integer, ForeignKey("module.id"))                  # Rust specific
+
+    module = relationship("Module", back_populates="constants")                      # Rust specific
+
+
+class TraitMethodSignature(Base):
+    __tablename__ = "trait_method_signature"         # Rust specific
+
+    id                   = Column(Integer, primary_key=True)                         # Rust specific
+    name                 = Column(String(255), index=True)                           # Rust specific
+    fully_qualified_path = Column(String(1024))                                      # Rust specific
+    input_types          = Column(JSONType)                                          # Rust specific
+    output_types         = Column(JSONType)                                          # Rust specific
+    src_location         = Column(String(512))                                       # Rust specific
+    src_code             = Column(Text)                                              # Rust specific
+    line_number_start    = Column(Integer)                                           # Rust specific
+    line_number_end      = Column(Integer)                                           # Rust specific
+    crate_name           = Column(String(255))                                       # Rust specific
+    module_path          = Column(String(512))                                       # Rust specific
+    module_name          = Column(String(512))                                       # Rust specific
+    visibility           = Column(String(64))                                        # Rust specific
+    doc_comments         = Column(Text)                                              # Rust specific
+    attributes           = Column(JSONType)                                          # Rust specific
+    is_async             = Column(Boolean, default=False)                            # Rust specific
+    is_unsafe            = Column(Boolean, default=False)                            # Rust specific
+    module_id            = Column(Integer, ForeignKey("module.id"))                  # Rust specific
+
+    module = relationship("Module", back_populates="trait_sigs")                     # Rust specific
+
+    trait_id = Column(Integer, ForeignKey("trait.id"))                     # Rust specific
+    trait    = relationship("Trait", back_populates="methods")             # Rust specific
+
+
+class Trait(Base):
+    __tablename__ = "trait"
+
+    id   = Column(Integer, primary_key=True)                               # Rust specific
+    name = Column(String(255), index=True)                                 # Rust specific
+    fully_qualified_path = Column(String(1024))                            # Rust specific
+    src_location = Column(String(512))                                     # Rust specific
+    module_name = Column(String(512))                                      # Rust specific
+    module_path = Column(String(512))                                      # Rust specific
+    crate_name = Column(String(255))                                       # Rust specific
+    module_id    = Column(Integer, ForeignKey("module.id"))                # Rust specific
+
+    module  = relationship("Module", back_populates="traits")              # Rust specific
+    methods = relationship("TraitMethodSignature", back_populates="trait") # Rust specific
+    impl_blocks = relationship("ImplBlock", back_populates="trait")        # Rust specific
+
+
+
+
+# What to do in the importer
+# When you create an ImplBlock row keep its DB id and set
+# fn_row.impl_block_id = impl_block_id for every method inside the block.
+
+# When you encounter a Trait item, insert a Trait row, grab its id, and set
+# sig_row.trait_id = trait_id for each TraitMethodSignature inside that trait.
+
+# If you don’t wire those IDs yet, the FK columns stay NULL and nothing breaks.
