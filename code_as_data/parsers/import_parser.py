@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from . import list_files_recursive, get_module_name, error_trace
 from code_as_data.models.import_model import Import
@@ -115,9 +115,59 @@ class ImportParser:
         # Clear existing state
         self.imports = {}
 
-        # Process each module file
+        # Process each Haskell module file
         for file_path in self._get_module_files():
             self.process_single_module(file_path)
+        # ---- Rust FileAnalysis JSONs (minimal addition) ----
+        rust_jsons = [
+            f for f in list_files_recursive(self.path, pattern=".json")
+            if not f.endswith(".hs.module_imports.json") and not f.endswith(".hs.json")
+        ]
+        for file_path in rust_jsons:
+            try:
+                with open(file_path, "r") as f:
+                    obj = json.load(f)
+            except Exception:
+                continue
+
+            # skip non-FileAnalysis or files without Rust use-statements
+            if not isinstance(obj, dict) or "use_statements" not in obj:
+                continue
+
+            def _infer_mod(o: Dict[str, Any]) -> str:
+                # Try to build "<crate>::<module_path>" from any bucket; fallback to unknown
+                for bucket in ("use_statements","functions","type_definitions","impl_blocks",
+                               "trait_method_signatures","constant_definitions","module_declarations"):
+                    for it in o.get(bucket, []) or []:
+                        crate = it.get("crate_name")
+                        modp  = it.get("module_path") or ""
+                        if crate:
+                            return f"{crate}{('::' + modp) if modp else ''}"
+                        fqp = it.get("fully_qualified_path")
+                        if fqp:
+                            return fqp.rsplit("::", 1)[0] if "::" in fqp else fqp
+                return "<unknown_crate>"
+
+            module_name = _infer_mod(obj)
+            file_src    = obj.get("file_path", file_path)
+
+            rows: List[Import] = []
+            for u in obj.get("use_statements", []) or []:
+                ln = u.get("line_number", -1)
+                try:
+                    rows.append(Import(
+                        src_loc=file_src,
+                        module_name=module_name,
+                        line_number_start=ln,
+                        line_number_end=ln,
+                        path=u.get("path"),
+                        visibility=u.get("visibility"),
+                    ))
+                except Exception as e:
+                    error_trace(e)
+                    continue
+            if rows:
+                self.imports.setdefault(module_name, []).extend(rows)
 
         return self.imports
 

@@ -1,5 +1,5 @@
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 import time
 import os
 import csv
@@ -17,12 +17,23 @@ from code_as_data.parsers.class_parser import ClassParser
 from code_as_data.parsers.import_parser import ImportParser
 from code_as_data.parsers.type_parser import TypeParser
 from code_as_data.parsers.instance_parser import InstanceParser
+from code_as_data.parsers.module_parser import ModuleParser
 from code_as_data.models.function_model import Function
 from code_as_data.models.class_model import Class
 from code_as_data.models.import_model import Import
 from code_as_data.models.type_model import Type, TypeVariant
 from code_as_data.models.instance_model import Instance
 import concurrent.futures
+from code_as_data.parsers.trait_parser import TraitParser
+from code_as_data.parsers.trait_method_signature_parser import (
+        TraitMethodSignatureParser,
+    )
+from code_as_data.models.trait_model import Trait
+from code_as_data.models.trait_method_signature_model import TraitMethodSignature
+from code_as_data.parsers.impl_block_parser import ImplBlockParser
+from code_as_data.models.impl_block_model import ImplBlock
+from code_as_data.parsers.constant_parser import ConstantParser
+from code_as_data.models.constant_model import Constant
 
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # Seconds between retries
@@ -48,6 +59,7 @@ class DumpService:
         self.class_parser = ClassParser(fdep_path)
         self.import_parser = ImportParser(fdep_path)
         self.type_parser = TypeParser(fdep_path)
+        self.module_parser = ModuleParser(fdep_path)
 
         # For optimized bulk loading
         self.temp_dir = None
@@ -59,6 +71,22 @@ class DumpService:
         self.constructor_id_map = {}
         self.instance_id_map = {}
         self.csv_files = {}
+        # Rust: optional trait plumbing
+        self.trait_parser = TraitParser(fdep_path) if TraitParser else None
+        self.trait_method_signature_parser = (
+            TraitMethodSignatureParser(fdep_path)
+            if TraitMethodSignatureParser
+            else None
+        )
+        self.impl_block_parser = (
+            ImplBlockParser(fdep_path) if ImplBlockParser else None
+        )
+        self.constant_parser = (
+            ConstantParser(fdep_path) if ConstantParser else None
+        )
+        self.trait_id_map = {}
+        self.impl_block_id_map = {}
+        self.constant_id_map = {}
 
     @contextmanager
     def get_session(self):
@@ -146,6 +174,24 @@ class DumpService:
             Dictionary of module names to types
         """
         return self.type_parser.load()
+
+    def process_modules(self) -> Dict[str, List[Module]]:
+        """
+        Process module dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to modules
+        """
+        if not self.module_parser:
+            return {}
+
+        # Load module data
+        self.module_parser.load()
+
+        # Get modules as domain models
+        modules = self.module_parser.get_modules()
+
+        return modules
 
     def process_instances(
         self, module_vs_functions: Dict[str, List[Function]]
@@ -310,7 +356,7 @@ class DumpService:
         print("First pass: Generating robust function ID mappings...")
 
         # Dictionary to store all functions with their signatures for disambiguation
-        all_functions:Dict[(str,Function)] = {}
+        all_functions:Dict[str,Function] = {}   # is this the expected correct type?
         function_canonical_keys = {}
 
         for module_name, functions in functions_by_module.items():
@@ -318,7 +364,9 @@ class DumpService:
                 # Create a canonical key that includes more information to disambiguate
                 canonical_signature = function.function_signature or ""
 
-                if function.src_loc and function.line_number_start > 0:
+                if function.fully_qualified_path:
+                    canonical_key = function.fully_qualified_path
+                elif function.src_loc and function.line_number_start > 0:
                     canonical_key = f"{module_name}:{function.function_name}:{canonical_signature}:{function.src_loc}:{function.line_number_start}"
                 else:
                     canonical_key = (
@@ -441,20 +489,17 @@ class DumpService:
                         continue
 
                     for called_function in function.functions_called:
-                        if (
-                            not called_function.module_name
-                            or not called_function.function_name
-                        ):
+                        # Normalize callee (supports Haskell & Rust)
+                        callee_info = self._called_info(called_function)
+                        if not callee_info:
+                            missing_dependencies += 1
                             continue
 
-                        # Get the canonical key(s) for the callee
-                        simple_callee_key = (
-                            called_function.module_name,
-                            called_function.function_name,
-                        )
-                        callee_canonical_keys = function_canonical_keys.get(
-                            simple_callee_key
-                        )
+                        callee_module_name, callee_fn_name = callee_info
+
+                        # Get the canonical key(s) for the callee (by module & name)
+                        simple_callee_key = (callee_module_name, callee_fn_name)
+                        callee_canonical_keys = function_canonical_keys.get(simple_callee_key)
 
                         if not callee_canonical_keys:
                             missing_dependencies += 1
@@ -477,9 +522,7 @@ class DumpService:
                             dependency_key = (caller_id, callee_id)
                             if dependency_key not in function_dependencies:
                                 function_dependencies.add(dependency_key)
-                                function_dependency_writer.writerow(
-                                    [caller_id, callee_id]
-                                )
+                                function_dependency_writer.writerow([caller_id, callee_id])
                                 dependency_count += 1
                             else:
                                 skipped_duplicates += 1
@@ -540,24 +583,56 @@ class DumpService:
                 if hasattr(function, "functions_called") and function.functions_called:
                     for called_function in function.functions_called:
                         # Extract attributes from the called function
-                        module_name_val = getattr(called_function, "module_name", None)
-                        name_val = getattr(called_function, "name", None)
-                        function_name_val = (
-                            getattr(called_function, "function_name", None) or name_val
+                        # module_name_val = getattr(called_function, "module_name", None)
+                        # name_val = getattr(called_function, "name", None)
+                        # function_name_val = (
+                        #     getattr(called_function, "function_name", None) or name_val
+                        # )
+                        # package_name_val = getattr(
+                        #     called_function, "package_name", None
+                        # )
+                        # src_loc_val = getattr(called_function, "src_loc", None)
+                        # type_val = getattr(called_function, "_type", None) or getattr(
+                        #     called_function, "type_enum", ""
+                        # )
+                        # function_signature_val = getattr(
+                        #     called_function, "function_signature", None
+                        # )
+                        # type_enum_val = getattr(
+                        #     called_function, "type_enum", None
+                        # ) or getattr(called_function, "_type", "")
+
+                        # Normalize module/name (works for Haskell & Rust)
+                        mn_fn = self._called_info(called_function)
+                        module_name_val, function_name_val = (None, None)
+                        if mn_fn:
+                            module_name_val, function_name_val = mn_fn
+
+                        # Optional extras – try attrs, fall back to dict keys
+                        def _get(obj, attr, key):
+                            v = getattr(obj, attr, None)
+                            if v is None and isinstance(obj, dict):
+                                v = obj.get(key)
+                            return v
+
+                        name_val = _get(called_function, "name", "name")
+                        package_name_val = (
+                            _get(called_function, "package_name", "package_name")
+                            or _get(called_function, "origin_crate", "origin_crate")
                         )
-                        package_name_val = getattr(
-                            called_function, "package_name", None
+                        src_loc_val = (
+                            _get(called_function, "src_loc", "src_loc")
+                            or _get(called_function, "src_location", "src_location")
                         )
-                        src_loc_val = getattr(called_function, "src_loc", None)
-                        type_val = getattr(called_function, "_type", None) or getattr(
-                            called_function, "type_enum", ""
+                        type_val = (
+                            _get(called_function, "_type", "_type")
+                            or _get(called_function, "type_enum", "type_enum")
+                            or _get(called_function, "call_type", "call_type")
                         )
-                        function_signature_val = getattr(
-                            called_function, "function_signature", None
+                        function_signature_val = _get(
+                            called_function, "function_signature", "function_signature"
                         )
-                        type_enum_val = getattr(
-                            called_function, "type_enum", None
-                        ) or getattr(called_function, "_type", "")
+                        type_enum_val = type_val or ""
 
                         # Write to CSV
                         function_called_writer.writerow(
@@ -595,27 +670,58 @@ class DumpService:
                     ):
                         for called_function in where_func.functions_called:
                             # Extract attributes from the called function
-                            module_name_val = getattr(
-                                called_function, "module_name", None
+                            # module_name_val = getattr(
+                            #     called_function, "module_name", None
+                            # )
+                            # name_val = getattr(called_function, "name", None)
+                            # function_name_val = (
+                            #     getattr(called_function, "function_name", None)
+                            #     or name_val
+                            # )
+                            # package_name_val = getattr(
+                            #     called_function, "package_name", None
+                            # )
+                            # src_loc_val = getattr(called_function, "src_loc", None)
+                            # type_val = getattr(
+                            #     called_function, "_type", None
+                            # ) or getattr(called_function, "type_enum", "")
+                            # function_signature_val = getattr(
+                            #     called_function, "function_signature", None
+                            # )
+                            # type_enum_val = getattr(
+                            #     called_function, "type_enum", None
+                            # ) or getattr(called_function, "_type", "")
+                             # Normalize module/name (works for Haskell & Rust)
+                            mn_fn = self._called_info(called_function)
+                            module_name_val, function_name_val = (None, None)
+                            if mn_fn:
+                                module_name_val, function_name_val = mn_fn
+
+                            # Optional extras – try attrs, fall back to dict keys
+                            def _get(obj, attr, key):
+                                v = getattr(obj, attr, None)
+                                if v is None and isinstance(obj, dict):
+                                    v = obj.get(key)
+                                return v
+
+                            name_val = _get(called_function, "name", "name")
+                            package_name_val = (
+                                _get(called_function, "package_name", "package_name")
+                                or _get(called_function, "origin_crate", "origin_crate")
                             )
-                            name_val = getattr(called_function, "name", None)
-                            function_name_val = (
-                                getattr(called_function, "function_name", None)
-                                or name_val
+                            src_loc_val = (
+                                _get(called_function, "src_loc", "src_loc")
+                                or _get(called_function, "src_location", "src_location")
                             )
-                            package_name_val = getattr(
-                                called_function, "package_name", None
+                            type_val = (
+                                _get(called_function, "_type", "_type")
+                                or _get(called_function, "type_enum", "type_enum")
+                                or _get(called_function, "call_type", "call_type")
                             )
-                            src_loc_val = getattr(called_function, "src_loc", None)
-                            type_val = getattr(
-                                called_function, "_type", None
-                            ) or getattr(called_function, "type_enum", "")
-                            function_signature_val = getattr(
-                                called_function, "function_signature", None
+                            function_signature_val = _get(
+                                called_function, "function_signature", "function_signature"
                             )
-                            type_enum_val = getattr(
-                                called_function, "type_enum", None
-                            ) or getattr(called_function, "_type", "")
+                            type_enum_val = type_val or ""
 
                             # Write to CSV
                             function_called_writer.writerow(
@@ -639,6 +745,329 @@ class DumpService:
 
         print(f"Prepared {function_call_count} function calls for bulk loading")
         return function_call_count
+    # --- helpers to normalize callee info from Haskell or Rust dumps ----------
+    def _split_fqp(self, fqp: str) -> Optional[Tuple[str, str]]:
+        """
+        Split a fully-qualified path like 'crate::mod::name' into
+        (module_name='crate::mod', function_name='name').
+        Returns None if it can't split.
+        """
+        if not fqp or not isinstance(fqp, str):
+            return None
+        parts = [p for p in fqp.split("::") if p]
+        if len(parts) < 2:
+            return None
+        return ("::".join(parts[:-1]), parts[-1])
+
+    def _called_info(self, called: Any) -> Optional[Tuple[str, str]]:
+        """
+        Return (module_name, function_name) for a called function/method entry.
+        Handles:
+          - Haskell-shaped objects (attrs or dict) with module_name/function_name
+          - Rust-shaped dicts with fully_qualified_path
+        """
+        # attribute-style (Haskell model objects)
+        mod = getattr(called, "module_name", None)
+        fn = getattr(called, "function_name", None)
+        if mod and fn:
+            return (mod, fn)
+        # dict-style (Haskell dicts or Rust FileAnalysis)
+        if isinstance(called, dict):
+            mod = called.get("module_name")
+            fn = called.get("function_name")
+            if mod and fn:
+                return (mod, fn)
+            
+            # Rust-specific logic
+            origin_crate = called.get("origin_crate")
+            origin_module = called.get("origin_module")
+            name = called.get("name")
+            
+            if origin_crate and origin_module and name:
+                return (f"{origin_crate}::{origin_module}", name)
+            elif origin_crate and name:
+                return (origin_crate, name)
+            
+            fqp = called.get("fully_qualified_path")
+            if fqp:
+                return self._split_fqp(fqp)
+        return None
+
+    def process_traits(self) -> Dict[str, List[Trait]]:
+        """
+        Process trait dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to traits
+        """
+        if not self.trait_parser:
+            return {}
+
+        # Load trait data
+        self.trait_parser.load()
+
+        # Get traits as domain models
+        traits = self.trait_parser.get_traits()
+
+        return traits
+
+    def process_trait_method_signatures(self) -> Dict[str, List[TraitMethodSignature]]:
+        """
+        Process trait method signature dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to trait method signatures
+        """
+        if not self.trait_method_signature_parser:
+            return {}
+
+        # Load trait method signature data
+        self.trait_method_signature_parser.load()
+
+        # Get trait method signatures as domain models
+        trait_method_signatures = (
+            self.trait_method_signature_parser.get_trait_method_signatures()
+        )
+
+        return trait_method_signatures
+
+    def process_impl_blocks(self) -> Dict[str, List[ImplBlock]]:
+        """
+        Process impl block dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to impl blocks
+        """
+        if not self.impl_block_parser:
+            return {}
+
+        # Load impl block data
+        self.impl_block_parser.load()
+
+        # Get impl blocks as domain models
+        impl_blocks = self.impl_block_parser.get_impl_blocks()
+
+        return impl_blocks
+
+    def process_constants(self) -> Dict[str, List[Constant]]:
+        """
+        Process constant dump files and return the parsed data.
+
+        Returns:
+            Dictionary of module names to constants
+        """
+        if not self.constant_parser:
+            return {}
+
+        # Load constant data
+        self.constant_parser.load()
+
+        # Get constants as domain models
+        constants = self.constant_parser.get_constants()
+
+        return constants
+
+    def prepare_trait_csv(self, traits_by_module):
+        """Rust: traits -> trait table."""
+        if not traits_by_module:
+            return
+        print("Preparing traits CSV...")
+        writer = self.prepare_csv_file(
+            "trait",
+            [
+                "id",
+                "name",
+                "fully_qualified_path",
+                "src_location",
+                "module_name",
+                "module_id",
+                "module_path",
+                "crate_name",
+            ],
+        )
+        trait_id = self.get_next_id("trait")
+        for module_name, traits in traits_by_module.items():
+            module_id = self.module_id_map.get(module_name)
+            if not module_id:
+                continue
+            for t in traits:
+                writer.writerow(
+                    [
+                        trait_id,
+                        getattr(t, "name", None),
+                        getattr(t, "fully_qualified_path", None),
+                        getattr(t, "src_location", None),
+                        getattr(t, "module_name", None),
+                        module_id,
+                        getattr(t, "module_path", None),
+                        getattr(t, "crate_name", None),
+                    ]
+                )
+                fqp = getattr(t, "fully_qualified_path", None)
+                if fqp:
+                    self.trait_id_map[fqp] = trait_id
+                trait_id += 1
+        print(f"Prepared {trait_id-1} traits for bulk loading")
+
+    def prepare_trait_method_signature_csv(self, sigs_by_module):
+        """Rust: trait method signatures -> trait_method_signature table."""
+        if not sigs_by_module:
+            return
+        print("Preparing trait_method_signature CSV...")
+        writer = self.prepare_csv_file(
+            "trait_method_signature",
+            [
+                "id",
+                "name",
+                "fully_qualified_path",
+                "src_code",
+                "src_location",
+                "line_number_start",
+                "line_number_end",
+                "module_name",
+                "input_types",
+                "output_types",
+                "visibility",
+                "doc_comments",
+                "attributes",
+                "is_async",
+                "is_unsafe",
+                "trait_id",
+            ],
+        )
+        sig_id = self.get_next_id("trait_method_signature")
+
+        def _json(v):
+            return json.dumps(v) if v is not None else None
+
+        for module_name, sigs in sigs_by_module.items():
+            for s in sigs:
+                # resolve trait_id if not already set by parser
+                trait_id = getattr(s, "trait_id", None)
+                if trait_id is None:
+                    fqp = getattr(s, "fully_qualified_path", None)
+                    if isinstance(fqp, str) and "::" in fqp:
+                        trait_fqp = fqp.rsplit("::", 1)[0]
+                        trait_id = self.trait_id_map.get(trait_fqp)
+
+                writer.writerow(
+                    [
+                        sig_id,
+                        getattr(s, "name", None),
+                        getattr(s, "fully_qualified_path", None),
+                        getattr(s, "src_code", None),
+                        getattr(s, "src_location", None),
+                        getattr(s, "line_number_start", None),
+                        getattr(s, "line_number_end", None),
+                        getattr(s, "module_name", None),
+                        _json(getattr(s, "input_types", None)),
+                        _json(getattr(s, "output_types", None)),
+                        getattr(s, "visibility", None),
+                        getattr(s, "doc_comments", None),
+                        _json(getattr(s, "attributes", None)),
+                        getattr(s, "is_async", False),
+                        getattr(s, "is_unsafe", False),
+                        trait_id,
+                    ]
+                )
+                sig_id += 1
+        print(f"Prepared {sig_id-1} trait method signatures for bulk loading")
+
+    def prepare_impl_block_csv(self, impl_blocks_by_module):
+        """Rust: impl blocks -> impl_block table."""
+        if not impl_blocks_by_module:
+            return
+        print("Preparing impl_blocks CSV...")
+        writer = self.prepare_csv_file(
+            "impl_block",
+            [
+                "id",
+                "struct_name",
+                "struct_fqp",
+                "trait_name",
+                "trait_fqp",
+                "src_location",
+                "module_name",
+                "module_id",
+                "crate_name",
+            ],
+        )
+        impl_block_id = self.get_next_id("impl_block")
+        for module_name, impl_blocks in impl_blocks_by_module.items():
+            module_id = self.module_id_map.get(module_name)
+            if not module_id:
+                continue
+            for i in impl_blocks:
+                writer.writerow(
+                    [
+                        impl_block_id,
+                        getattr(i, "struct_name", None),
+                        getattr(i, "struct_fqp", None),
+                        getattr(i, "trait_name", None),
+                        getattr(i, "trait_fqp", None),
+                        getattr(i, "src_location", None),
+                        getattr(i, "module_name", None),
+                        module_id,
+                        getattr(i, "crate_name", None),
+                    ]
+                )
+                # fqp = getattr(t, "fully_qualified_path", None)
+                # if fqp:
+                #     self.trait_id_map[fqp] = trait_id
+                impl_block_id += 1
+        print(f"Prepared {impl_block_id - 1} impl_blocks for bulk loading")
+
+    def prepare_constant_csv(self, constants_by_module):
+        """Rust: constants -> constant table."""
+        if not constants_by_module:
+            return
+        print("Preparing constants CSV...")
+        writer = self.prepare_csv_file(
+            "constant",
+            [
+                "id",
+                "name",
+                "fully_qualified_path",
+                "const_type",
+                "src_location",
+                "src_code",
+                "line_number_start",
+                "line_number_end",
+                "module_id",
+                "visibility",
+                "doc_comments",
+                "attributes",
+                "is_static",
+            ],
+        )
+        constant_id = self.get_next_id("constant")
+        for module_name, constants in constants_by_module.items():
+            module_id = self.module_id_map.get(module_name)
+            if not module_id:
+                continue
+            for c in constants:
+                writer.writerow(
+                    [
+                        constant_id,
+                        getattr(c, "name", None),
+                        getattr(c, "fully_qualified_path", None),
+                        json.dumps(getattr(c, "const_type", None)),
+                        getattr(c, "src_location", None),
+                        getattr(c, "src_code", None),
+                        getattr(c, "line_number_start", None),
+                        getattr(c, "line_number_end", None),
+                        module_id,
+                        getattr(c, "visibility", None),
+                        getattr(c, "doc_comments", None),
+                        json.dumps(getattr(c, "attributes", None)),
+                        getattr(c, "is_static", False),
+                    ]
+                )
+                fqp = getattr(c, "fully_qualified_path", None)
+                if fqp:
+                    self.constant_id_map[fqp] = constant_id
+                constant_id += 1
+        print(f"Prepared {constant_id - 1} constants for bulk loading")
 
     def prepare_class_csv(self, classes_by_module):
         """Prepare CSV file for classes."""
@@ -1066,6 +1495,10 @@ class DumpService:
         # Load in this specific order to handle dependencies properly
         table_order = [
             "module",
+            "trait",
+            "trait_method_signature",
+            "impl_block",
+            "constant",
             "function",
             "where_function",
             "function_called",
@@ -1333,6 +1766,26 @@ class DumpService:
             print("Starting parallel type parsing...")
             future_types = executor.submit(self.type_parser.load)
 
+            # Start the constant parsing
+            print("Starting parallel constant parsing...")
+            future_constants = executor.submit(self.process_constants)
+
+            # Start the impl block parsing
+            print("Starting parallel impl block parsing...")
+            future_impl_blocks = executor.submit(self.process_impl_blocks)
+
+            # Start the module parsing
+            print("Starting parallel module parsing...")
+            future_modules = executor.submit(self.process_modules)
+
+            # Start the trait parsing
+            print("Starting parallel trait parsing...")
+            future_traits = executor.submit(self.process_traits)
+
+            # Start the trait method signature parsing
+            print("Starting parallel trait method signature parsing...")
+            future_trait_sigs = executor.submit(self.process_trait_method_signatures)
+
             # Process instances in the main process while others are running
             # This depends on functions which we already have
             print("Processing instances (main process)...")
@@ -1366,6 +1819,36 @@ class DumpService:
             toc = time.perf_counter()
             print(f"Types parsing completed in {toc - tic:0.4f} seconds")
 
+            # Constants
+            tic = time.perf_counter()
+            constants_by_module = future_constants.result()
+            toc = time.perf_counter()
+            print(f"Constants parsing completed in {toc - tic:0.4f} seconds")
+
+            # Impl blocks
+            tic = time.perf_counter()
+            impl_blocks_by_module = future_impl_blocks.result()
+            toc = time.perf_counter()
+            print(f"Impl blocks parsing completed in {toc - tic:0.4f} seconds")
+
+            # Modules
+            tic = time.perf_counter()
+            modules_by_module = future_modules.result()
+            toc = time.perf_counter()
+            print(f"Modules parsing completed in {toc - tic:0.4f} seconds")
+
+            # Traits
+            tic = time.perf_counter()
+            traits_by_module = future_traits.result()
+            toc = time.perf_counter()
+            print(f"Traits parsing completed in {toc - tic:0.4f} seconds")
+
+            # Trait Method Signatures
+            tic = time.perf_counter()
+            trait_sigs_by_module = future_trait_sigs.result()
+            toc = time.perf_counter()
+            print(f"Trait method signatures parsing completed in {toc - tic:0.4f} seconds")
+
         # Reset CPU affinity if needed
         try:
             current_process = psutil.Process(os.getpid())
@@ -1388,6 +1871,11 @@ class DumpService:
             imports_by_module,
             types_by_module,
             instances_by_module,
+            constants_by_module,
+            impl_blocks_by_module,
+            modules_by_module,
+            traits_by_module,
+            trait_sigs_by_module,
         )
 
     def insert_data(self) -> None:
@@ -1405,7 +1893,14 @@ class DumpService:
                 imports_by_module,
                 types_by_module,
                 instances_by_module,
+                constants_by_module,
+                impl_blocks_by_module,
+                modules_by_module,
+                traits_by_module,
+                trait_sigs_by_module,
             ) = self.extreme_parallel_processing()
+
+            # Rust-only (safe when parsers absent)
 
             # Rest of the method remains unchanged
             # Combine all modules into one list
@@ -1415,6 +1910,11 @@ class DumpService:
                 + list(imports_by_module.keys())
                 + list(types_by_module.keys())
                 + list(instances_by_module.keys())
+                + list(traits_by_module.keys())
+                + list(trait_sigs_by_module.keys())
+                + list(impl_blocks_by_module.keys())
+                + list(constants_by_module.keys())
+                + list(modules_by_module.keys())
             )
             print(f"Total modules to process: {len(module_list)}")
 
@@ -1427,6 +1927,10 @@ class DumpService:
                 tic = time.perf_counter()
 
                 self.prepare_module_csv(module_list)
+                self.prepare_trait_csv(traits_by_module)
+                self.prepare_trait_method_signature_csv(trait_sigs_by_module)
+                self.prepare_impl_block_csv(impl_blocks_by_module)
+                self.prepare_constant_csv(constants_by_module)
                 self.prepare_function_csv(functions_by_module)
                 self.prepare_function_called_csv(functions_by_module)
                 self.prepare_class_csv(classes_by_module)
