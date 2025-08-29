@@ -555,12 +555,23 @@ class DumpService:
                 "id",
                 "module_name",
                 "name",
-                "function_name",
                 "package_name",
                 "src_loc",
                 "_type",
+                "function_name",
                 "function_signature",
                 "type_enum",
+                # Rust-specific fields
+                "fully_qualified_path",
+                "is_method",
+                "receiver_type",
+                "input_types",
+                "output_types",
+                "line_number",
+                "column_number",
+                "origin_crate",
+                "origin_module",
+                "call_type",
                 "function_id",
                 "where_function_id",
             ],
@@ -634,18 +645,46 @@ class DumpService:
                         )
                         type_enum_val = type_val or ""
 
+                        # Extract Rust-specific fields
+                        fully_qualified_path_val = _get(called_function, "fully_qualified_path", "fully_qualified_path")
+                        is_method_val = _get(called_function, "is_method", "is_method")
+                        receiver_type_val = _get(called_function, "receiver_type", "receiver_type")
+                        input_types_val = _get(called_function, "input_types", "input_types")
+                        output_types_val = _get(called_function, "output_types", "output_types")
+                        line_number_val = _get(called_function, "line_number", "line_number")
+                        column_number_val = _get(called_function, "column_number", "column_number")
+                        origin_crate_val = _get(called_function, "origin_crate", "origin_crate")
+                        origin_module_val = _get(called_function, "origin_module", "origin_module")
+                        call_type_val = _get(called_function, "call_type", "call_type")
+
+                        # Serialize JSON fields
+                        receiver_type_json = json.dumps(receiver_type_val) if receiver_type_val else None
+                        input_types_json = json.dumps(input_types_val) if input_types_val else None
+                        output_types_json = json.dumps(output_types_val) if output_types_val else None
+
                         # Write to CSV
                         function_called_writer.writerow(
                             [
                                 function_called_id,
                                 module_name_val,
                                 name_val,
-                                function_name_val,
                                 package_name_val,
                                 src_loc_val,
                                 type_val,
+                                function_name_val,
                                 function_signature_val,
                                 type_enum_val,
+                                # Rust-specific fields
+                                fully_qualified_path_val,
+                                is_method_val,
+                                receiver_type_json,
+                                input_types_json,
+                                output_types_json,
+                                line_number_val,
+                                column_number_val,
+                                origin_crate_val,
+                                origin_module_val,
+                                call_type_val,
                                 function_id,
                                 None,  # where_function_id is None here
                             ]
@@ -723,18 +762,46 @@ class DumpService:
                             )
                             type_enum_val = type_val or ""
 
+                            # Extract Rust-specific fields
+                            fully_qualified_path_val = _get(called_function, "fully_qualified_path", "fully_qualified_path")
+                            is_method_val = _get(called_function, "is_method", "is_method")
+                            receiver_type_val = _get(called_function, "receiver_type", "receiver_type")
+                            input_types_val = _get(called_function, "input_types", "input_types")
+                            output_types_val = _get(called_function, "output_types", "output_types")
+                            line_number_val = _get(called_function, "line_number", "line_number")
+                            column_number_val = _get(called_function, "column_number", "column_number")
+                            origin_crate_val = _get(called_function, "origin_crate", "origin_crate")
+                            origin_module_val = _get(called_function, "origin_module", "origin_module")
+                            call_type_val = _get(called_function, "call_type", "call_type")
+
+                            # Serialize JSON fields
+                            receiver_type_json = json.dumps(receiver_type_val) if receiver_type_val else None
+                            input_types_json = json.dumps(input_types_val) if input_types_val else None
+                            output_types_json = json.dumps(output_types_val) if output_types_val else None
+
                             # Write to CSV
                             function_called_writer.writerow(
                                 [
                                     function_called_id,
                                     module_name_val,
                                     name_val,
-                                    function_name_val,
                                     package_name_val,
                                     src_loc_val,
                                     type_val,
+                                    function_name_val,
                                     function_signature_val,
                                     type_enum_val,
+                                    # Rust-specific fields
+                                    fully_qualified_path_val,
+                                    is_method_val,
+                                    receiver_type_json,
+                                    input_types_json,
+                                    output_types_json,
+                                    line_number_val,
+                                    column_number_val,
+                                    origin_crate_val,
+                                    origin_module_val,
+                                    call_type_val,
                                     None,  # function_id is None for where function calls
                                     where_function_id,
                                 ]
@@ -764,33 +831,54 @@ class DumpService:
         Return (module_name, function_name) for a called function/method entry.
         Handles:
           - Haskell-shaped objects (attrs or dict) with module_name/function_name
-          - Rust-shaped dicts with fully_qualified_path
+          - Rust-shaped dicts with fully_qualified_path, origin_crate, origin_module, name
         """
         # attribute-style (Haskell model objects)
         mod = getattr(called, "module_name", None)
         fn = getattr(called, "function_name", None)
         if mod and fn:
             return (mod, fn)
+        
         # dict-style (Haskell dicts or Rust FileAnalysis)
         if isinstance(called, dict):
+            # Try Haskell-style first
             mod = called.get("module_name")
             fn = called.get("function_name")
             if mod and fn:
                 return (mod, fn)
             
-            # Rust-specific logic
+            # Rust-specific logic - handle both functions_called and methods_called
             origin_crate = called.get("origin_crate")
             origin_module = called.get("origin_module")
             name = called.get("name")
             
-            if origin_crate and origin_module and name:
-                return (f"{origin_crate}::{origin_module}", name)
-            elif origin_crate and name:
-                return (origin_crate, name)
+            # For Rust, construct module name from crate and module path
+            if origin_crate and name:
+                if origin_module and origin_module != "":
+                    # Construct full module path: crate::module
+                    module_name = f"{origin_crate}::{origin_module}"
+                else:
+                    # Just use crate name if no module path
+                    module_name = origin_crate
+                return (module_name, name)
             
+            # Fallback to fully_qualified_path
             fqp = called.get("fully_qualified_path")
             if fqp:
                 return self._split_fqp(fqp)
+        
+        # Try attribute-style for Rust objects (FunctionCalled model objects)
+        origin_crate = getattr(called, "origin_crate", None)
+        origin_module = getattr(called, "origin_module", None)
+        name = getattr(called, "name", None)
+        
+        if origin_crate and name:
+            if origin_module and origin_module != "":
+                module_name = f"{origin_crate}::{origin_module}"
+            else:
+                module_name = origin_crate
+            return (module_name, name)
+        
         return None
 
     def process_traits(self) -> Dict[str, List[Trait]]:
@@ -1933,6 +2021,8 @@ class DumpService:
                 self.prepare_constant_csv(constants_by_module)
                 self.prepare_function_csv(functions_by_module)
                 self.prepare_function_called_csv(functions_by_module)
+                # Create function dependencies after function_called data is prepared
+                self.prepare_function_dependencies_from_calls()
                 self.prepare_class_csv(classes_by_module)
                 self.prepare_import_csv(imports_by_module)
                 self.prepare_type_csv(types_by_module)
@@ -2030,6 +2120,87 @@ class DumpService:
         except Exception as e:
             print(f"Error creating clean CSV for {table_name}: {e}")
             return original_csv_path  # Return original path if cleaning fails
+
+    def prepare_function_dependencies_from_calls(self):
+        """
+        Create function dependencies based on the function_called data.
+        This method analyzes the function_called table to find internal function calls
+        and creates dependencies between functions that exist in our function table.
+        """
+        print("Creating function dependencies from function calls...")
+        
+        # Check if we already have a function_dependency CSV file
+        if "function_dependency" not in self.csv_files:
+            # Create the CSV file if it doesn't exist
+            function_dependency_writer = self.prepare_csv_file(
+                "function_dependency", ["caller_id", "callee_id"]
+            )
+        else:
+            # Use existing writer
+            function_dependency_writer = self.csv_files["function_dependency"]["writer"]
+        
+        dependencies_created = 0
+        
+        # Create a reverse lookup map: function name -> function IDs
+        function_name_to_ids = {}
+        for (module_name, function_name), function_id in self.function_id_map.items():
+            if function_name not in function_name_to_ids:
+                function_name_to_ids[function_name] = []
+            function_name_to_ids[function_name].append(function_id)
+        
+        # Analyze function calls to create dependencies
+        # We'll look for calls where the called function name matches an internal function
+        # We need to get the functions by module from the processed data
+        functions_by_module = {}
+        for function in self.function_parser.get_functions():
+            if function.module_name not in functions_by_module:
+                functions_by_module[function.module_name] = []
+            functions_by_module[function.module_name].append(function)
+        
+        for module_name, functions in functions_by_module.items():
+            for function in functions:
+                caller_id = self.function_id_map.get((module_name, function.function_name))
+                if not caller_id:
+                    continue
+                
+                # Check all function calls from this function
+                for called_function in function.functions_called:
+                    # Get the name of the called function
+                    called_name = getattr(called_function, "name", None)
+                    if not called_name:
+                        continue
+                    
+                    # Check if this called function name matches any internal function
+                    if called_name in function_name_to_ids:
+                        for callee_id in function_name_to_ids[called_name]:
+                            # Don't create self-dependencies
+                            if caller_id != callee_id:
+                                function_dependency_writer.writerow([caller_id, callee_id])
+                                dependencies_created += 1
+                
+                # Also check where functions
+                for where_name, where_func in function.where_functions.items():
+                    where_key = f"{module_name}:{function.function_name}:{where_name}"
+                    where_caller_id = self.where_function_id_map.get(where_key)
+                    
+                    if not where_caller_id:
+                        continue
+                    
+                    # Check function calls from where functions
+                    if hasattr(where_func, "functions_called") and where_func.functions_called:
+                        for called_function in where_func.functions_called:
+                            called_name = getattr(called_function, "name", None)
+                            if not called_name:
+                                continue
+                            
+                            if called_name in function_name_to_ids:
+                                for callee_id in function_name_to_ids[called_name]:
+                                    # Don't create self-dependencies
+                                    if where_caller_id != callee_id:
+                                        function_dependency_writer.writerow([where_caller_id, callee_id])
+                                        dependencies_created += 1
+        
+        print(f"Created {dependencies_created} function dependencies from function calls")
 
     def insert_dependency_batch(self, db, table_name, batch):
         """Insert a batch of dependencies."""

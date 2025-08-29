@@ -1,4 +1,4 @@
-# Code as data - Haskell
+# Code as Data - Multi-Language Support
 
 # SQL Query Guide for Code Analysis Database
 
@@ -9,6 +9,15 @@ This guide provides information on how to directly query the code analysis datab
 - Common SQL query examples
 
 NOTE: If your a dev then you might prefer going through <a href="https://www.postgresql.org/docs/](https://github.com/juspay/code-as-data/blob/main/readme-dev.md"> this </a>
+
+## Supported Languages
+
+This tool supports analysis of multiple programming languages:
+
+- **Haskell**: Complete support via GHC Plugin Fdep
+- **Rust**: Full integration with comprehensive analysis capabilities
+
+The database schema accommodates both language-specific constructs and shared programming concepts.
 
 ## Database Schema Overview
 
@@ -30,9 +39,13 @@ The database stores information about code components extracted from a codebase,
 | `type` | Type definitions in the code |
 | `constructor` | Constructors for types |
 | `field` | Fields in constructors |
-| `class` | Class definitions |
-| `instance` | Instance definitions |
-| `instance_function` | Associations between instances and functions |
+| `class` | Class definitions (Haskell) |
+| `instance` | Instance definitions (Haskell) |
+| `instance_function` | Associations between instances and functions (Haskell) |
+| `trait` | Trait definitions (Rust) |
+| `impl_block` | Implementation blocks (Rust) |
+| `constant` | Constant definitions (Rust) |
+| `trait_method_signature` | Method signatures in traits (Rust) |
 
 #### Relationship Tables
 
@@ -67,8 +80,24 @@ CREATE TABLE function (
     line_number_end INTEGER,
     type_enum VARCHAR(512),
     module_id INTEGER REFERENCES module(id),
+    -- Haskell-specific fields
     function_input JSON,
-    function_output JSON
+    function_output JSON,
+    -- Rust-specific fields
+    fully_qualified_path VARCHAR(512),
+    is_method BOOLEAN,
+    self_type VARCHAR(255),
+    input_types JSON,
+    output_types JSON,
+    types_used JSON,
+    literals_used JSON,
+    methods_called JSON,
+    visibility VARCHAR(50),
+    doc_comments TEXT,
+    attributes JSON,
+    crate_name VARCHAR(255),
+    module_path VARCHAR(512),
+    impl_block_id INTEGER REFERENCES impl_block(id)
 );
 ```
 
@@ -216,6 +245,79 @@ CREATE TABLE type_dependency (
     dependent_id INTEGER REFERENCES type(id),
     dependency_id INTEGER REFERENCES type(id),
     PRIMARY KEY (dependent_id, dependency_id)
+);
+```
+
+### Rust-Specific Tables
+
+#### Trait Table
+
+```sql
+CREATE TABLE trait (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(255),
+    fully_qualified_path VARCHAR(512),
+    src_location VARCHAR(512),
+    module_name VARCHAR(255),
+    module_id INTEGER REFERENCES module(id),
+    module_path VARCHAR(512),
+    crate_name VARCHAR(255)
+);
+```
+
+#### Implementation Block Table
+
+```sql
+CREATE TABLE impl_block (
+    id INTEGER PRIMARY KEY,
+    struct_name VARCHAR(255),
+    struct_fqp VARCHAR(512),
+    trait_name VARCHAR(255),
+    trait_fqp VARCHAR(512),
+    src_location VARCHAR(512),
+    module_id INTEGER REFERENCES module(id),
+    trait_id INTEGER REFERENCES trait(id)
+);
+```
+
+#### Constant Table
+
+```sql
+CREATE TABLE constant (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(255),
+    fully_qualified_path VARCHAR(512),
+    const_type JSON,
+    src_location VARCHAR(512),
+    src_code TEXT,
+    line_number_start INTEGER,
+    line_number_end INTEGER,
+    module_id INTEGER REFERENCES module(id),
+    visibility VARCHAR(50),
+    attributes JSON,
+    is_static BOOLEAN
+);
+```
+
+#### Trait Method Signature Table
+
+```sql
+CREATE TABLE trait_method_signature (
+    id INTEGER PRIMARY KEY,
+    name VARCHAR(255),
+    fully_qualified_path VARCHAR(512),
+    input_types JSON,
+    output_types JSON,
+    src_location VARCHAR(512),
+    src_code TEXT,
+    line_number_start INTEGER,
+    line_number_end INTEGER,
+    module_name VARCHAR(255),
+    visibility VARCHAR(50),
+    attributes JSON,
+    is_async BOOLEAN,
+    is_unsafe BOOLEAN,
+    trait_id INTEGER REFERENCES trait(id)
 );
 ```
 
@@ -483,7 +585,94 @@ SELECT 'Classes', COUNT(*) FROM class
 UNION ALL
 SELECT 'Instances', COUNT(*) FROM instance
 UNION ALL
+SELECT 'Traits (Rust)', COUNT(*) FROM trait
+UNION ALL
+SELECT 'Impl Blocks (Rust)', COUNT(*) FROM impl_block
+UNION ALL
+SELECT 'Constants (Rust)', COUNT(*) FROM constant
+UNION ALL
 SELECT 'Function Calls', COUNT(*) FROM function_dependency;
+```
+
+## Rust-Specific Queries
+
+### 20. Find All Traits
+
+```sql
+SELECT t.name, t.fully_qualified_path, m.name AS module_name
+FROM trait t
+JOIN module m ON t.module_id = m.id
+ORDER BY t.name;
+```
+
+### 21. Find Implementation Blocks for a Trait
+
+```sql
+SELECT ib.struct_name, ib.struct_fqp, m.name AS module_name
+FROM impl_block ib
+JOIN module m ON ib.module_id = m.id
+WHERE ib.trait_name = 'Debug'
+ORDER BY ib.struct_name;
+```
+
+### 22. Find Methods for a Struct
+
+```sql
+SELECT f.name, f.function_signature, f.visibility
+FROM function f
+JOIN impl_block ib ON f.impl_block_id = ib.id
+WHERE ib.struct_name = 'MyStruct'
+ORDER BY f.name;
+```
+
+### 23. Find Constants by Visibility
+
+```sql
+SELECT c.name, c.fully_qualified_path, c.visibility, m.name AS module_name
+FROM constant c
+JOIN module m ON c.module_id = m.id
+WHERE c.visibility = 'pub'
+ORDER BY c.name;
+```
+
+### 24. Find Functions with Specific Input/Output Types
+
+```sql
+-- Functions that take String as input
+SELECT f.name, f.fully_qualified_path, m.name AS module_name
+FROM function f
+JOIN module m ON f.module_id = m.id
+WHERE f.input_types::text LIKE '%String%'
+ORDER BY f.name;
+
+-- Functions that return Result type
+SELECT f.name, f.fully_qualified_path, m.name AS module_name
+FROM function f
+JOIN module m ON f.module_id = m.id
+WHERE f.output_types::text LIKE '%Result%'
+ORDER BY f.name;
+```
+
+### 25. Find Trait Method Signatures
+
+```sql
+SELECT tms.name, tms.input_types, tms.output_types, t.name AS trait_name
+FROM trait_method_signature tms
+JOIN trait t ON tms.trait_id = t.id
+WHERE t.name = 'Iterator'
+ORDER BY tms.name;
+```
+
+### 26. Find All Structs that Implement Multiple Traits
+
+```sql
+SELECT ib.struct_name, COUNT(ib.trait_name) AS trait_count, 
+       STRING_AGG(ib.trait_name, ', ') AS implemented_traits
+FROM impl_block ib
+WHERE ib.trait_name IS NOT NULL
+GROUP BY ib.struct_name
+HAVING COUNT(ib.trait_name) > 1
+ORDER BY trait_count DESC;
 ```
 
 ## Connecting to the Database

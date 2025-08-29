@@ -367,9 +367,17 @@ class FunctionParser:
         return local_fdep
 
     def _ensure_type_in_calls(self, calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure all function calls have a _type field for compatibility."""
         for call in calls:
-            if "_type" not in call:
-                call["_type"] = "function"
+            if "_type" not in call and "call_type" not in call:
+                # Set default type based on is_method field if available
+                if call.get("is_method", False):
+                    call["_type"] = "method"
+                else:
+                    call["_type"] = "function"
+            elif "call_type" in call and "_type" not in call:
+                # Use call_type as _type for Rust compatibility
+                call["_type"] = call["call_type"]
         return calls
 
     # ───────────────────────────  R U S T  ────────────────────────────
@@ -395,7 +403,9 @@ class FunctionParser:
                     "function_name": wname,
                     "src_loc": wf.get("src_location"),
                     "raw_string": wf.get("src_code"),
-                    "functions_called": self._ensure_type_in_calls(wf.get("functions_called", []) + wf.get("methods_called", [])),
+                    "functions_called": self._ensure_type_in_calls(
+                        (wf.get("functions_called", []) or []) + (wf.get("methods_called", []) or [])
+                    ),
                     # carry Rust extras so Function.__init__ can fan them into WhereFunction
                     "fully_qualified_path": wf.get("fully_qualified_path"),
                     "input_types": wf.get("input_types"),
@@ -416,8 +426,8 @@ class FunctionParser:
                 "line_number_start": fn.get("line_number_start", -1),
                 "line_number_end":   fn.get("line_number_end",   -1),
                 "functions_called":  self._ensure_type_in_calls(
-                    fn.get("functions_called", [])   # free functions & macros
-                    + fn.get("methods_called",  [])  # methods on a receiver
+                    (fn.get("functions_called", []) or [])   # free functions & macros
+                    + (fn.get("methods_called",  []) or [])  # methods on a receiver
                 ),
                 "where_functions":   rust_where,
                 "_type":             "_function",
