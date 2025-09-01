@@ -1125,6 +1125,214 @@ To tune performance:
 4. Push to the branch: `git push origin feature-name`
 5. Submit a pull request
 
+## NetworkX Graph Export
+
+The tool includes a comprehensive NetworkX graph exporter that creates detailed graph representations of your codebase for advanced analysis, visualization, and integration with external graph analysis tools.
+
+### Overview
+
+The NetworkX graph exporter (`scripts/export_networkx_graph.py`) processes code analysis data and creates rich graph representations that capture:
+
+- **Function call relationships**: Direct and nested function calls
+- **Module dependencies**: Cross-module relationships and imports
+- **Type relationships**: Type usage and dependencies
+- **Language-specific constructs**: Traits, impl blocks (Rust), classes, instances (Haskell)
+- **Nested structures**: Where functions, closures, and complex nested JSON data
+
+### Technical Architecture
+
+#### Core Components
+
+**Graph Builder (`create_codebase_graph`)**
+- Automatically detects Haskell (`.hs.json`) and Rust (`.json`) files
+- Uses existing parsers for comprehensive data extraction
+- Creates unified NetworkX DiGraph with all relationships
+
+**HTML Entity Cleaning (`clean_html_entities`)**
+- Handles complex type signatures like `Vec<T, A>` properly
+- Prevents HTML encoding issues in GraphML output
+- Ensures compatibility with external analysis tools
+
+**Multi-Format Export (`export_graph`)**
+- GraphML: Standard format for Gephi, Cytoscape, and other tools
+- GEXF: Gephi native format with rich metadata support
+- gpickle: NetworkX native format for Python analysis
+- PNG: High-quality visualizations with proper categorization
+
+#### Language Support
+
+**Haskell Support**
+- Functions and where functions
+- Type definitions and constructors
+- Class and instance definitions
+- Import statements and module relationships
+- Nested function structures
+
+**Rust Support**
+- Functions and methods
+- Trait definitions and implementations
+- Struct and enum types
+- Implementation blocks (impl)
+- Constants and visibility modifiers
+- Crate and module organization
+
+### Usage Examples
+
+#### Basic Export
+
+```bash
+# Export with default settings
+python scripts/export_networkx_graph.py
+
+# Custom input/output directories
+python scripts/export_networkx_graph.py \
+  --input /path/to/fdep_output \
+  --output /path/to/networkx_graph_exports \
+  --name my_project_graph
+
+# Skip visualization for large datasets
+python scripts/export_networkx_graph.py \
+  --input fdep_output \
+  --name large_project \
+  --no-viz
+```
+
+#### Programmatic Usage
+
+```python
+from scripts.export_networkx_graph import create_codebase_graph, export_graph
+import networkx as nx
+
+# Create graph from fdep output
+G = create_codebase_graph("fdep_output")
+
+# Add custom analysis
+print(f"Graph has {G.number_of_nodes()} nodes and {G.number_of_edges()} edges")
+
+# Find most connected nodes
+centrality = nx.degree_centrality(G)
+top_nodes = sorted(centrality.items(), key=lambda x: x[1], reverse=True)[:10]
+
+# Export to multiple formats
+export_graph(G, "output_dir", "analysis_graph")
+```
+
+### Graph Schema
+
+#### Node Types
+
+The exporter creates nodes with the following categories:
+
+| Category | Description | Source |
+|----------|-------------|---------|
+| `function` | Function definitions | Both languages |
+| `type` | Type definitions | Both languages |
+| `trait` | Trait definitions | Rust only |
+| `impl` | Implementation blocks | Rust only |
+| `constant` | Constant definitions | Rust only |
+| `import` | Import statements | Both languages |
+| `module` | Module definitions | Both languages |
+| `class` | Class definitions | Haskell only |
+| `instance` | Instance definitions | Haskell only |
+| `where_function` | Nested functions | Both languages |
+
+#### Edge Types
+
+The exporter creates edges with the following relationships:
+
+| Relation | Description | Example |
+|----------|-------------|---------|
+| `calls` | Function call relationship | `main` calls `process_data` |
+| `contains` | Containment relationship | `module` contains `function` |
+| `implements_for` | Implementation relationship | `struct` implements `trait` |
+| `has` | Ownership relationship | `type` has `field` |
+| `uses` | Usage relationship | `function` uses `type` |
+| `imports` | Import relationship | `module` imports `library` |
+
+
+
+### Advanced Analysis Examples
+
+### Integration with External Tools
+
+#### Gephi Integration
+
+```bash
+# Export for Gephi analysis
+python scripts/export_networkx_graph.py --name gephi_analysis
+
+# Open the .gexf file in Gephi for interactive exploration
+# Recommended Gephi layouts:
+# - ForceAtlas2: For general network structure
+# - Fruchterman Reingold: For clustered visualization
+# - Circular Layout: For hierarchical structures
+```
+
+#### Cytoscape Integration
+
+```bash
+# Export GraphML for Cytoscape
+python scripts/export_networkx_graph.py --name cytoscape_analysis
+
+# Import the .graphml file into Cytoscape
+# Recommended Cytoscape layouts:
+# - Hierarchical Layout: For call hierarchies
+# - Circular Layout: For module dependencies
+# - Force-Directed Layout: For general structure
+```
+
+#### Neo4j Integration
+
+```python
+# Convert NetworkX graph to Neo4j
+from neo4j import GraphDatabase
+import pickle
+
+# Load NetworkX graph
+with open('networkx_graph_exports/codebase_graph.gpickle', 'rb') as f:
+    G = pickle.load(f)
+
+# Connect to Neo4j
+driver = GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "password"))
+
+def create_neo4j_graph(tx, G):
+    # Create nodes
+    for node, data in G.nodes(data=True):
+        category = data.get('category', 'unknown')
+        label = data.get('label', node)
+        
+        tx.run(
+            f"CREATE (n:{category.title()} {{id: $id, label: $label, category: $category}})",
+            id=node, label=label, category=category
+        )
+    
+    # Create relationships
+    for source, target, data in G.edges(data=True):
+        relation = data.get('relation', 'RELATED_TO').upper()
+        tx.run(
+            f"MATCH (a {{id: $source}}), (b {{id: $target}}) CREATE (a)-[:{relation}]->(b)",
+            source=source, target=target
+        )
+
+with driver.session() as session:
+    session.write_transaction(create_neo4j_graph, G)
+```
+
+### Performance Considerations
+
+#### Large Codebase Optimization
+
+For large codebases (>10,000 functions), consider these optimizations:
+
+```bash
+# Skip visualization for faster processing
+python scripts/export_networkx_graph.py --no-viz
+
+# Process in chunks for very large datasets
+python scripts/export_networkx_graph.py --input fdep_output_chunk1 --name chunk1
+python scripts/export_networkx_graph.py --input fdep_output_chunk2 --name chunk2
+```
+
 ## TODO
 
 - [ ] Multiple repo support

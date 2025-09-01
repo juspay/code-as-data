@@ -710,9 +710,67 @@ CREATE INDEX idx_function_name ON function(name);
 CREATE INDEX idx_module_name ON module(name);
 ```
 
+## NetworkX Graph Export
+
+The tool includes a powerful NetworkX graph exporter that creates comprehensive graph representations of your codebase for advanced analysis and visualization.
+
+### Graph Export Features
+
+- **Multi-format export**: GraphML, GEXF, gpickle formats for different analysis tools
+
+- **Multi-language support**: Works with both Haskell and Rust codebases
+- **Professional visualization**: High-quality graph visualizations with proper categorization
+
+### Usage
+
+Export your codebase as a NetworkX graph:
+
+```bash
+# Basic usage with sample data
+python scripts/export_networkx_graph.py --input fdep_output --output networkx_graph_exports --name my_codebase_graph
+
+# Custom output directory and name
+python scripts/export_networkx_graph.py --input fdep_output --output production_graphs --name hyperswitch_complete
+
+# Skip visualization for faster processing
+python scripts/export_networkx_graph.py --input fdep_output --name quick_export --no-viz
+```
+
+### Output Formats
+
+The exporter creates multiple file formats for different use cases:
+
+- **GraphML** (`.graphml`): Standard format for graph analysis tools like Gephi, Cytoscape
+- **GEXF** (`.gexf`): Gephi native format with rich metadata
+- **gpickle** (`.gpickle`): NetworkX native format for Python analysis
+- **PNG** (`.png`): High-quality visualization (optional)
+
+### Graph Statistics
+
+
+### Command-Line Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--input`, `-i` | Input directory containing dump files | `fdep_output` |
+| `--output`, `-o` | Output directory for graph files | `networkx_graph_exports` |
+| `--name`, `-n` | Base name for output files | `codebase_graph` |
+| `--no-viz` | Skip visualization generation | False |
+
+### Integration with Analysis Tools
+
+The exported graphs can be used with various analysis tools:
+
+- **Gephi**: Use `.gexf` or `.graphml` files for interactive graph exploration
+- **Cytoscape**: Import `.graphml` files for biological network-style analysis
+- **NetworkX**: Load `.gpickle` files directly in Python for custom analysis
+- **Graph databases**: Convert formats for Neo4j or other graph databases
+
 ## Additional Resources
 
 For more advanced SQL queries and database management:
 
 - [PostgreSQL Documentation](https://www.postgresql.org/docs/)
 - [SQL Tutorial](https://www.w3schools.com/sql/)
+- [NetworkX Documentation](https://networkx.org/documentation/stable/)
+- [Gephi Graph Analysis](https://gephi.org/)
