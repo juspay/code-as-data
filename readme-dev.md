@@ -1005,11 +1005,8 @@ The project includes Pydantic models for domain objects across both languages:
 
 The project includes comprehensive test coverage across both languages:
 
-#### Test Coverage Summary
-
-- **Total Test Cases**: 56 query operations
-- **Passing Tests**: 53 (94.6% success rate)
-- **Not Applicable**: 3 (Haskell-specific features not relevant to Rust)
+# test sheet of the feature (Rust)
+(https://docs.google.com/spreadsheets/d/1eYF8_KshjqjQ8kfy6X-Y2Fh_asFM9wMQuIsI2eHXl1Y/edit?usp=sharing)
 
 #### Test Categories
 
