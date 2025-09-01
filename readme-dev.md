@@ -1064,29 +1064,6 @@ To run all tests:
 pytest tests/
 ```
 
-To run specific test categories:
-
-```bash
-# Run Rust-specific tests
-pytest tests/ -k "rust"
-
-# Run manual test suites
-python manual_tests_part_1.py
-python manual_tests_part_2.py
-# ... through part 9
-
-# Run specific query operator tests
-pytest tests/test_rust_query_operators.py
-pytest tests/test_complex_queries.py
-```
-
-#### Test Files Structure
-
-- `manual_tests_part_*.py`: Comprehensive manual test suites (parts 1-9)
-- `tests/test_rust_query_operators.py`: Rust-specific query tests
-- `tests/test_complex_queries.py`: Advanced query functionality
-- `tests/test_pattern_matching.py`: Pattern matching capabilities
-- `test_sheet.csv`: Complete test case documentation with expected outputs
 
 ### Performance Tuning
 
