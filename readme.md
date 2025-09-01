@@ -31,7 +31,8 @@ The database stores information about code components extracted from a codebase,
 
 ### Tables and Relationships
 
-![Image](./images/mermaid-flow-transparent.svg)
+<!-- ![Image](./images/mermaid-flow-transparent.svg) -->
+![Image](./images/mermaid-diagram-2025-08-01.svg)
 
 #### Main Tables
 
