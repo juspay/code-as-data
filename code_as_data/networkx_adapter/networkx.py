@@ -238,7 +238,20 @@ class NetworkxAdapter:
             # Edge to implementing type (if that type node exists already)
             if impl.implementing_type:
                 typ = impl.implementing_type
-                typ_id = f"{typ.module_path}:{typ.type_name}"
+                
+                # Handle both object and dictionary formats for Rust compatibility
+                if hasattr(typ, 'module_path') and hasattr(typ, 'type_name'):
+                    # Object format (Haskell style)
+                    typ_id = f"{typ.module_path}:{typ.type_name}"
+                elif isinstance(typ, dict):
+                    # Dictionary format (Rust style)
+                    module_path = typ.get('module_path') or typ.get('module_name', module_name)
+                    type_name = typ.get('type_name') or typ.get('name', 'unknown')
+                    typ_id = f"{module_path}:{type_name}"
+                else:
+                    # Fallback: skip this edge if we can't determine the type
+                    continue
+                    
                 if self.G.has_node(typ_id):
                     self.G.add_edge(impl_id, typ_id, type="implements")
 

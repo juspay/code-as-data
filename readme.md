@@ -19,6 +19,12 @@ This tool supports analysis of multiple programming languages:
 
 The database schema accommodates both language-specific constructs and shared programming concepts.
 
+## Architecture
+
+The following diagram illustrates the complete data flow of the `code-as-data` repository, from raw code analysis dumps to the final, queryable graph outputs.
+
+![Architecture Diagram](images/code-as-data-diagram.png)
+
 ## Database Schema Overview
 
 The database stores information about code components extracted from a codebase, including modules, functions, types, classes, instances, and their relationships.
