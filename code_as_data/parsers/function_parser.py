@@ -14,10 +14,9 @@ from code_as_data.models.function_model import Function
 class FunctionParser:
     """Parser for function data from dump files."""
 
-    def __init__(self, fdep_path: str):
+    def __init__(self, fdep_path: str, light_version: bool = False):
         """
         Initialize the function parser.
-
         Args:
             fdep_path: Path to the function dump files
         """
@@ -26,6 +25,7 @@ class FunctionParser:
         self.top_lvl_functions = []
         self.module_name_path = {}
         self.code_string_dict = {}
+        self.light_version = light_version
 
     def _update_nested_key(self, d: Dict, keys: List[str], value: Any) -> None:
         """
@@ -260,7 +260,6 @@ class FunctionParser:
                     if "**" in functionsName
                     else ""
                 )
-
                 try:
                     local_fdep[fName] = {
                         "function_name": fName,
@@ -285,7 +284,7 @@ class FunctionParser:
                     for i in functionData:
                         if i and i.get("typeSignature") is not None:
                             local_fdep[fName]["function_signature"] = i.get(
-                                "typeSignature"
+                                "typeSignature" # doubt why function signature resplacing everytime
                             )
                         elif i and i.get("expr") is not None:
                             local_fdep[fName]["functions_called"].append(i.get("expr"))
@@ -301,32 +300,39 @@ class FunctionParser:
                     error_trace(e)
                     print(f"Error processing function {fName}: {e}")
 
-            else:
-                # Handle nested functions
-                parentFunctions = functionsName.replace("$_in$", "").split("::")
-                (currentFunctionName, currentFunctionSrcLocation) = (
-                    parentFunctions[(len(parentFunctions) - 1)].split("**")
-                    if "**" in parentFunctions[(len(parentFunctions) - 1)]
-                    else (parentFunctions[(len(parentFunctions) - 1)], "")
-                )
+        for functionsName, functionData in obj.items():
+            if "::" in functionsName:
+                if self.light_version:
+                    core_parent_fName = functionsName.replace("$_in$", "").split("::")[0]
+                    for i in functionData:
+                        if i and i.get("expr"):
+                            local_fdep[core_parent_fName]["functions_called"].append(i.get("expr"))
+                else:
+                    # Handle nested functions - for Heavy graph
+                    parentFunctions = functionsName.replace("$_in$", "").split("::")
+                    (currentFunctionName, currentFunctionSrcLocation) = (
+                        parentFunctions[(len(parentFunctions) - 1)].split("**")
+                        if "**" in parentFunctions[(len(parentFunctions) - 1)]
+                        else (parentFunctions[(len(parentFunctions) - 1)], "")
+                    )
 
-                currentFunctionDict = {
-                    "function_name": currentFunctionName,
-                    "src_loc": currentFunctionSrcLocation,
-                    "functions_called": [],
-                }
+                    currentFunctionDict = {
+                        "function_name": currentFunctionName,
+                        "src_loc": currentFunctionSrcLocation,
+                        "functions_called": [],
+                    }
 
-                for i in functionData:
-                    if i and i.get("typeSignature") is not None:
-                        currentFunctionDict["function_signature"] = i.get(
-                            "typeSignature"
-                        )
-                    elif i and i.get("expr") is not None:
-                        currentFunctionDict["functions_called"].append(i.get("expr"))
+                    for i in functionData:
+                        if i and i.get("typeSignature") is not None:
+                            currentFunctionDict["function_signature"] = i.get(
+                                "typeSignature"
+                            )
+                        elif i and i.get("expr") is not None:
+                            currentFunctionDict["functions_called"].append(i.get("expr"))
 
-                self._update_nested_key(
-                    local_fdep, parentFunctions, currentFunctionDict
-                )
+                    self._update_nested_key(
+                        local_fdep, parentFunctions, currentFunctionDict
+                    )
 
         # Remove duplicates from functions_called
         self._deduplicate_functions_called(local_fdep)

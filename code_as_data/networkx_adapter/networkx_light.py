@@ -14,7 +14,7 @@ import pickle
 
 def generate_light_networkx(fdep_path,pickle_file_path_with_name):
     # class_parser = ClassParser(json_path=fdep_path)
-    function_parser = FunctionParser(fdep_path=fdep_path)
+    function_parser = FunctionParser(fdep_path=fdep_path, light_version=True)
     # import_parser = ImportParser(raw_code_path=fdep_path)
     type_parser = TypeParser(raw_code_path=fdep_path)
 
