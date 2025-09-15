@@ -14,7 +14,7 @@ import pickle
 
 def generate_light_networkx(fdep_path,pickle_file_path_with_name):
     # class_parser = ClassParser(json_path=fdep_path)
-    function_parser = FunctionParser(fdep_path=fdep_path)
+    function_parser = FunctionParser(fdep_path=fdep_path, light_version=True)
     # import_parser = ImportParser(raw_code_path=fdep_path)
     type_parser = TypeParser(raw_code_path=fdep_path)
 
@@ -60,7 +60,7 @@ def generate_light_networkx(fdep_path,pickle_file_path_with_name):
         for functionBody in f:
             function_name_without_src = functionBody.function_name.split("**")[0]
             function_name_with_module = f"{m}--{function_name_without_src}"
-            G.add_node(function_name_with_module,signature=functionBody.function_signature,code=functionBody.raw_string,instances=list(set(functionBody.instances_used)))
+            G.add_node(function_name_with_module,node_type="function",signature=functionBody.function_signature,code=functionBody.raw_string,instances=list(set(functionBody.instances_used)))
             instances_used = functionBody.instances_used
             def traverseWhereFunctions(functionBody:Function):
                 try:
@@ -94,7 +94,7 @@ def generate_light_networkx(fdep_path,pickle_file_path_with_name):
                             + "--"
                             + function_id.split("**")[0]
                         )
-                        G.add_node(called_function_full_name)
+                        G.add_node(called_function_full_name, node_type="instance_function")
                         # G.add_edge(function_name_with_module, called_function_full_name)
                         for i in all_functions.get(function_module_name,[]):
                             if i.function_name == function_id:
@@ -109,7 +109,7 @@ def generate_light_networkx(fdep_path,pickle_file_path_with_name):
 
         if complex_type.variant == TypeVariant.ATOMIC and complex_type.atomic_component:
             # Full qualified type id: module:type
-            dep = f"{complex_type.atomic_component.module_name}:{complex_type.atomic_component.type_name}"
+            dep = f"{complex_type.atomic_component.module_name}--{complex_type.atomic_component.type_name}"
             if dep:
                 deps.add(dep)
 
@@ -175,21 +175,26 @@ def generate_light_networkx(fdep_path,pickle_file_path_with_name):
 
         return deps
 
-    for (module_name,types) in all_types.items():
+    all = list(all_functions.keys()) + list(all_types.keys()) + list(all_instances.keys())
+    for i in set(all):
+        types = all_types.get(i, [])
         for t in types:
-            type_id = f"{t.module_name}:{t.type_name}"
-            G.add_node(
-                t.id,code=t.raw_code
-            )
-
+            type_id = f"{t.module_name}--{t.type_name}"
+            attrs = {
+                "node_type": "Type",
+                "code": t.raw_code,
+            }
+            G.add_node(type_id, **attrs)
+            G.nodes[type_id].update(attrs)
             for constructor_name, fields in t.cons.items():
                 constructor_id = f"{type_id}.{constructor_name}"
-                G.add_node(constructor_id, type="constructor", belongs_to=type_id)
+                G.add_node(constructor_id, node_type="constructor", belongs_to=type_id)
                 G.add_edge(type_id, constructor_id, label="DECLARES")
 
                 for field in fields:
                     field_id = f"{constructor_id}.{field.field_name}"
-                    G.add_node(field_id, type="field", field_name=field.field_name)
+                    field_attrs = {"node_type":"field", "field_name": field.field_name}
+                    G.add_node(field_id, **field_attrs)
                     G.add_edge(constructor_id, field_id, label="HAS_FIELD")
 
                     deps = extract_dependent_type_ids(field.field_type.structure)
