@@ -86,7 +86,23 @@ class FunctionParser:
         """
         # Get all function files
         overall_start = time.time()
-        files = list_files_recursive(self.path, pattern=".hs.json")
+        files = list_files_recursive(
+            self.path,
+            pattern=[".hs.json", ".json"]     # rust dumps end with plain `.json`
+        )
+
+        # files = [
+        #     f for f in files
+        #     if (
+        #         f.endswith(".hs.json")
+        #         or (f.endswith(".json") and "/crates/" in f)
+        #     )
+        # ]
+        files = [
+            f for f in files
+            if f.endswith(".hs.json") or (f.endswith(".json") and not f.endswith(".hs.json"))
+        ]
+
         print(f"Found {len(files)} function files to process")
 
         if not files:
@@ -102,17 +118,20 @@ class FunctionParser:
         module_names = {}
         module_paths = {}
         for file_path in files:
-            module_name = get_module_name(self.path, file_path, ".hs.json")
+            ext = ".hs.json" if file_path.endswith(".hs.json") else ".json"
+            module_name = get_module_name(self.path, file_path, ext)
             module_names[file_path] = module_name
             module_paths[module_name] = file_path.replace(
                 (self.path + "/"), ""
             ).replace(".json", "")
 
-        # Pre-load all code string data in a single pass
+        #Pre-load all code string data in a single pass (Haskell only)
         code_strings = {}
         functions_vs_instances_used = {}
         # Types.hs.function_instance_mapping.json
         for file_path in files:
+            if not file_path.endswith(".hs.json"):
+                continue  # ← rust files have no side-car dumps
             module_name = module_names[file_path]
             function_code_path = file_path.replace(".hs.json", ".hs.function_code.json")
             try:
@@ -150,6 +169,8 @@ class FunctionParser:
 
         # Process all files sequentially with optimized I/O
         for file_path in files:
+            # decide once for this file
+            is_rust = file_path.endswith(".json") and not file_path.endswith(".hs.json")
             module_name = module_names[file_path]
 
             try:
@@ -168,32 +189,44 @@ class FunctionParser:
                                 for i in tmp_data:
                                     try:
                                         t = json.loads(i)
+                                        key = t.get("key")
+                                        if file_data.get(key) is None:
+                                            file_data[key] = []
+                                        file_data[key].append(t)
                                     except Exception as e:
-                                        pass
                                         # print(i)
-                                    key = t.get("key")
-                                    if file_data.get(key) == None:
-                                        file_data[key] = []
-                                    file_data[key].append(t)
+                                        pass
                             except Exception as e:
                                 error_trace(e)
                             finally:
                                 f.close()
 
-                # Get code strings for this module
-                module_code_strings = code_strings.get(module_name, {})
-                
-                module_functions_vs_instances_used = functions_vs_instances_used.get(
-                    module_name, {}
+                # Haskell side-cars exist only for .hs.json dumps
+                module_code_strings = (
+                    {} if is_rust else code_strings.get(module_name, {})
+                )
+                module_functions_vs_instances_used = (
+                    {} if is_rust else functions_vs_instances_used.get(module_name, {})
                 )
                 # Process the data
-                local_fdep = self._process_module_data(
-                    file_path,
-                    file_data,
-                    module_name,
-                    module_code_strings,
-                    module_functions_vs_instances_used,
-                )
+                if is_rust:
+                    if not isinstance(file_data, dict) or "functions" not in file_data:
+                        local_fdep = {}
+                    else:
+                        local_fdep = self._process_rust_module(
+                            file_path,
+                            file_data,
+                            module_name,
+                        )
+                else:
+                    local_fdep = self._process_module_data(
+                        file_path,
+                        file_data,
+                        module_name,
+                        module_code_strings,
+                        module_functions_vs_instances_used,
+                    )
+
 
                 # Update data structures
                 self.data[module_name] = local_fdep
@@ -339,6 +372,88 @@ class FunctionParser:
 
         return local_fdep
 
+    def _ensure_type_in_calls(self, calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure all function calls have a _type field for compatibility."""
+        for call in calls:
+            if "_type" not in call and "call_type" not in call:
+                # Set default type based on is_method field if available
+                if call.get("is_method", False):
+                    call["_type"] = "method"
+                else:
+                    call["_type"] = "function"
+            elif "call_type" in call and "_type" not in call:
+                # Use call_type as _type for Rust compatibility
+                call["_type"] = call["call_type"]
+        return calls
+
+    # ───────────────────────────  R U S T  ────────────────────────────
+    def _process_rust_module(
+        self,
+        file_path: str,
+        obj: Dict,
+        module_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Convert a Rust f-dep JSON (visitor.rs output) into the same nested
+        dict shape that Haskell processing produces.
+        """
+        local: Dict[str, Any] = {}
+
+        # The visitor writes {"functions":[{…}, …]}
+        for fn in obj.get("functions", []):
+            fname = fn["name"]
+            # normalize nested closures to our where_functions shape
+            rust_where = {}
+            for wname, wf in (fn.get("where_functions") or {}).items():
+                rust_where[wname] = {
+                    "function_name": wname,
+                    "src_loc": wf.get("src_location"),
+                    "raw_string": wf.get("src_code"),
+                    "functions_called": self._ensure_type_in_calls(
+                        (wf.get("functions_called", []) or []) + (wf.get("methods_called", []) or [])
+                    ),
+                    # carry Rust extras so Function.__init__ can fan them into WhereFunction
+                    "fully_qualified_path": wf.get("fully_qualified_path"),
+                    "input_types": wf.get("input_types"),
+                    "output_types": wf.get("output_types"),
+                    "types_used": wf.get("types_used"),
+                    "literals_used": wf.get("literals_used"),
+                    "methods_called": wf.get("methods_called"),
+                    "is_method": wf.get("is_method"),
+                    "self_type": wf.get("self_type"),
+                    "visibility": wf.get("visibility"),
+                    "doc_comments": wf.get("doc_comments"),
+                    "attributes": wf.get("attributes"),
+                }
+            local[fname] = {
+                "function_name": fname,
+                "src_loc": fn.get("src_location"),
+                "stringified_code": fn.get("src_code"),
+                "line_number_start": fn.get("line_number_start", -1),
+                "line_number_end":   fn.get("line_number_end",   -1),
+                "functions_called":  self._ensure_type_in_calls(
+                    (fn.get("functions_called", []) or [])   # free functions & macros
+                    + (fn.get("methods_called",  []) or [])  # methods on a receiver
+                ),
+                "where_functions":   rust_where,
+                "_type":             "_function",
+                "fully_qualified_path": fn.get("fully_qualified_path"),
+                # carry top-level Rust extras so we can map them in get_functions()
+                "is_method": fn.get("is_method"),
+                "self_type": fn.get("self_type"),
+                "input_types": fn.get("input_types"),
+                "output_types": fn.get("output_types"),
+                "types_used": fn.get("types_used"),
+                "literals_used": fn.get("literals_used"),
+                "methods_called_meta": fn.get("methods_called"),  # keep if you want
+                "visibility": fn.get("visibility"),
+                "doc_comments": fn.get("doc_comments"),
+                "attributes": fn.get("attributes"),
+                "crate_name": fn.get("crate_name"),
+                "module_path": fn.get("module_path"),
+            }
+        return local
+
     def _deduplicate_functions_called(self, local_fdep: Dict) -> None:
         """
         Remove duplicate function calls from each function.
@@ -346,6 +461,10 @@ class FunctionParser:
         Args:
             local_fdep: Local function dependency dictionary
         """
+        # rust entries already contain unique FQ paths – no need to dedup
+        if any(v.get("fully_qualified_path") for v in local_fdep.values()):
+            return
+
         for functionName, functionData in local_fdep.items():
             functions_called = functionData.get("functions_called", [])
             unique_elements = {}
@@ -425,7 +544,22 @@ class FunctionParser:
                     line_number_end=line_number_end,
                     function_input=function_body.get("function_input"),
                     function_output=function_body.get("function_output"),
-                    instances_used=function_body.get("instances_used",[])
+                    instances_used=function_body.get("instances_used",[]),
+                    # --- Rust extras (safe no-ops for Haskell) ---
+                    fully_qualified_path=function_body.get("fully_qualified_path"),
+                    is_method=function_body.get("is_method"),
+                    self_type=function_body.get("self_type"),
+                    input_types=function_body.get("input_types"),
+                    output_types=function_body.get("output_types"),
+                    types_used=function_body.get("types_used"),
+                    literals_used=function_body.get("literals_used"),
+                    # keep methods_called (the *metadata* list) distinct from `functions_called`
+                    methods_called=function_body.get("methods_called_meta"),
+                    visibility=function_body.get("visibility"),
+                    doc_comments=function_body.get("doc_comments"),
+                    attributes=function_body.get("attributes"),
+                    crate_name=function_body.get("crate_name"),
+                    module_path=function_body.get("module_path"),
                 )
 
                 functions.append(function)
