@@ -252,6 +252,8 @@ class FunctionParser:
         local_fdep = {}
 
         for functionsName, functionData in obj.items():
+            if not isinstance(functionData, list):
+                continue
             if not "::" in functionsName:
                 # Handle top-level functions
                 fName = functionsName.replace("$_in$", "")
@@ -304,9 +306,12 @@ class FunctionParser:
             if "::" in functionsName:
                 if self.light_version:
                     core_parent_fName = functionsName.replace("$_in$", "").split("::")[0]
+                    if core_parent_fName.strip() == "":
+                        continue
                     for i in functionData:
                         if i and i.get("expr"):
-                            local_fdep[core_parent_fName]["functions_called"].append(i.get("expr"))
+                            if core_parent_fName in local_fdep:
+                                local_fdep[core_parent_fName]["functions_called"].append(i.get("expr"))
                 else:
                     # Handle nested functions - for Heavy graph
                     parentFunctions = functionsName.replace("$_in$", "").split("::")
