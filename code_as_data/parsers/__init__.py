@@ -39,7 +39,7 @@ def get_module_name(base_dir_path, path, to_replace=""):
     finals_parts = []
     pth_parts = path.parts
     cur = 0
-    skip_single = {"app", "dist"}
+    skip_single = {"app", "dist", "compiler"}
     skip_pairs = {("build", "autogen")}
     while cur < len(pth_parts):
         if pth_parts[cur] in skip_single:
