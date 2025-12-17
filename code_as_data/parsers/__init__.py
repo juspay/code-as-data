@@ -1,6 +1,6 @@
-from typing import Dict, List, Optional
+from typing import List
 import os
-import json
+from pathlib import Path
 
 
 def list_files_recursive(path: str, pattern: str) -> List[str]:
@@ -35,8 +35,23 @@ def replace_all(text, replacements):
 
 
 def get_module_name(base_dir_path, path, to_replace=""):
+    path = Path(path).relative_to(base_dir_path)
+    finals_parts = []
+    pth_parts = path.parts
+    cur = 0
+    skip_single = {"app", "dist", "compiler"}
+    skip_pairs = {("build", "autogen")}
+    while cur < len(pth_parts):
+        if pth_parts[cur] in skip_single:
+            cur += 1
+            continue
+        if cur + 1 < len(pth_parts) and (pth_parts[cur], pth_parts[cur+1]) in skip_pairs:
+            cur += 2
+            continue
+        finals_parts.append(pth_parts[cur])
+        cur += 1
     path = (
-        path.replace(base_dir_path, "")
+        "/".join(finals_parts)
         .replace(".hs.json", "")
         .replace(".hs.module_imports.json", "")
         .replace(".hs.type.typechecker.json", "")
@@ -48,12 +63,6 @@ def get_module_name(base_dir_path, path, to_replace=""):
         .replace(".hs.fieldUsage.json", "")
         .replace(".hs.typeUpdates.json", "")
         .replace(".hs.types.parser.json", "")
-        .replace("/app/", "")
-        .replace("/dist/", "")
-        .replace("/build/autogen/", "")
-        .replace("app/", "")
-        .replace("dist/", "")
-        .replace("build/autogen/", "")
     )
     patterns = [
         ("src/", "src/"),
