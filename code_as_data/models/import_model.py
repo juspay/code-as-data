@@ -18,6 +18,9 @@ class Import(BaseModel):
     line_number_start: int
     line_number_end: int
 
+    path: Optional[str] = None          # raw `use foo::bar::Baz;`
+    visibility: Optional[str] = None    # "pub", "pub(crate)", None …
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True, from_attributes=True, populate_by_name=True
     )

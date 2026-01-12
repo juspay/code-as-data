@@ -20,6 +20,10 @@ from code_as_data.db.models import (
     InstanceFunction as DBInstanceFunction,
     function_dependency,
     type_dependency,
+    Trait as DBTrait,
+    TraitMethodSignature as DBTraitMethodSignature,
+    ImplBlock as DBImplBlock,
+    Constant as DBConstant,
 )
 
 
@@ -96,6 +100,10 @@ class QueryService:
             "field": DBField,
             "class": DBClass,
             "instance": DBInstance,
+            "trait": DBTrait,
+            "trait_method_signature": DBTraitMethodSignature,
+            "impl_block": DBImplBlock,
+            "constant": DBConstant,
             # Add a special pseudo-entity for handling "called_by"
             "calling_function": DBFunction,
         }
@@ -107,9 +115,16 @@ class QueryService:
             ("module", "type"): DBModule.types,
             ("module", "class"): DBModule.classes,
             ("module", "instance"): DBModule.instances,
+            ("module", "trait"): DBModule.traits,
+            ("module", "trait_method_signature"): DBModule.trait_sigs,
+            ("module", "impl_block"): DBModule.impl_blocks,
+            ("module", "constant"): DBModule.constants,
             ("function", "module"): DBFunction.module,
             ("function", "where_function"): DBFunction.where_functions,
             ("function", "called_function"): DBFunction.called_functions,
+            ("trait", "trait_method_signature"): DBTrait.methods,
+            ("impl_block", "function"): DBImplBlock.methods,
+            ("trait", "impl_block"): DBTrait.impl_blocks,
             # Note: We'll handle "calling_function" specially in _process_join
             # so we don't need an entry here
         }
@@ -476,8 +491,73 @@ class QueryService:
             return self._match_type_usage_pattern(pattern)
         elif pattern_type == "code_structure":
             return self._match_code_structure_pattern(pattern)
+        elif pattern_type == "struct_impl_trait":
+            return self._match_struct_impl_trait_pattern(pattern)
+        elif pattern_type == "function_calls_method_on_trait_impl":
+            return self._match_function_calls_method_on_trait_impl_pattern(pattern)
         else:
             raise ValueError(f"Unknown pattern type: {pattern_type}")
+
+    def _match_function_calls_method_on_trait_impl_pattern(self, pattern: Dict) -> List[Dict]:
+        """Match patterns of functions calling methods on structs that implement a trait."""
+        caller_name = pattern.get("caller_name")
+        trait_name = pattern.get("trait_name")
+
+        query = (
+            self.db.query(DBFunction, DBImplBlock, DBTrait)
+            .join(DBImplBlock, DBFunction.impl_block_id == DBImplBlock.id)
+            .join(DBTrait, DBImplBlock.trait_id == DBTrait.id)
+        )
+
+        if caller_name:
+            query = query.filter(DBFunction.name == caller_name)
+
+        if trait_name:
+            query = query.filter(DBTrait.name == trait_name)
+
+        results = []
+        for function, impl_block, trait in query.all():
+            results.append(
+                {
+                    "function": {
+                        "name": function.name,
+                    },
+                    "struct": {
+                        "name": impl_block.struct_name,
+                    },
+                    "trait": {
+                        "name": trait.name,
+                    },
+                }
+            )
+        return results
+
+    def _match_struct_impl_trait_pattern(self, pattern: Dict) -> List[Dict]:
+        """Match patterns of structs implementing traits."""
+        struct_name = pattern.get("struct_name")
+        trait_name = pattern.get("trait_name")
+
+        query = self.db.query(DBImplBlock)
+
+        if struct_name:
+            query = query.filter(DBImplBlock.struct_name == struct_name)
+
+        if trait_name:
+            query = query.filter(DBImplBlock.trait_name == trait_name)
+
+        results = []
+        for impl_block in query.all():
+            results.append(
+                {
+                    "struct": {
+                        "name": impl_block.struct_name,
+                    },
+                    "trait": {
+                        "name": impl_block.trait_name,
+                    },
+                }
+            )
+        return results
 
     def _match_function_call_pattern(self, pattern: Dict) -> List[Dict]:
         """Match patterns of function calls."""
@@ -636,7 +716,20 @@ class QueryService:
 
         output = []
         for row in results:
-            output.append(dict(row))
+            # Handle different SQLAlchemy result formats
+            if hasattr(row, '_mapping'):
+                # SQLAlchemy 1.4+ style
+                output.append(dict(row._mapping))
+            elif hasattr(row, 'keys'):
+                # Row-like object with keys
+                output.append(dict(zip(row.keys(), row)))
+            else:
+                # Try to convert directly
+                try:
+                    output.append(dict(row))
+                except (TypeError, ValueError):
+                    # If conversion fails, create a simple dict with indexed values
+                    output.append({f"col_{i}": val for i, val in enumerate(row)})
 
         return output
 
@@ -1591,16 +1684,17 @@ class QueryService:
         Returns:
             List of matching classes
         """
-        # Normalize module name to include .hs extension
-        normalized_module_name = f"{module_name}.hs"
-
+        # Try exact match first, then with .hs extension for Haskell compatibility
         return (
             self.db.query(DBClass)
             .join(DBModule, DBClass.module_id == DBModule.id)
             .filter(
                 and_(
                     DBClass.class_name == class_name,
-                    DBModule.name == normalized_module_name,
+                    or_(
+                        DBModule.name == module_name,  # Exact match (for non-Haskell)
+                        DBModule.name == f"{module_name}.hs"  # Haskell convention
+                    )
                 )
             )
             .all()
@@ -2178,4 +2272,265 @@ class QueryService:
             DBType instance if found, None otherwise
         """
 
-        return self.db.query(DBType).filter(DBType.name == type_name).first()
+        return self.db.query(DBType).filter(DBType.type_name == type_name).first()
+
+    def find_trait_by_name(self, name: str) -> List[DBTrait]:
+        """
+        Find traits by name.
+
+        Args:
+            name: Name of the trait
+
+        Returns:
+            List of matching traits
+        """
+        return self.db.query(DBTrait).filter(DBTrait.name == name).all()
+
+    def get_implementations_for_trait(self, trait_name: str) -> List[DBImplBlock]:
+        """
+        Get all impl blocks that implement a specific trait.
+
+        Args:
+            trait_name: Name of the trait
+
+        Returns:
+            List of impl blocks for the trait
+        """
+        return (
+            self.db.query(DBImplBlock)
+            .filter(DBImplBlock.trait_name == trait_name)
+            .all()
+        )
+
+    def get_methods_for_struct(self, struct_name: str) -> List[DBFunction]:
+        """
+        Get all functions defined in an impl block for a given struct.
+
+        Args:
+            struct_name: Name of the struct
+
+        Returns:
+            List of functions for the struct
+        """
+        return (
+            self.db.query(DBFunction)
+            .join(DBImplBlock, DBFunction.impl_block_id == DBImplBlock.id)
+            .filter(DBImplBlock.struct_name == struct_name)
+            .all()
+        )
+
+    def get_all_traits(self) -> List[DBTrait]:
+        """
+        Get all traits.
+        Returns:
+            List of traits
+        """
+        return self.db.query(DBTrait).all()
+
+    def get_trait_by_id(self, id: int) -> Optional[DBTrait]:
+        """
+        Get a trait by id.
+        Args:
+            id: ID of the trait
+        Returns:
+            Trait if found, None otherwise
+        """
+        return self.db.query(DBTrait).filter(DBTrait.id == id).first()
+
+    def get_all_impl_blocks(self) -> List[DBImplBlock]:
+        """
+        Get all impl blocks.
+        Returns:
+            List of impl blocks
+        """
+        return self.db.query(DBImplBlock).all()
+
+    def get_impl_blocks_for_struct(self, struct_name: str) -> List[DBImplBlock]:
+        """
+        Get all impl blocks for a given struct.
+        Args:
+            struct_name: Name of the struct
+        Returns:
+            List of impl blocks for the struct
+        """
+        return (
+            self.db.query(DBImplBlock)
+            .filter(DBImplBlock.struct_name == struct_name)
+            .all()
+        )
+
+    def get_all_constants(self) -> List[DBConstant]:
+        """
+        Get all constants.
+        Returns:
+            List of constants
+        """
+        return self.db.query(DBConstant).all()
+
+    def get_constant_by_name(self, name: str) -> List[DBConstant]:
+        """
+        Get constants by name.
+        Args:
+            name: Name of the constant
+        Returns:
+            List of matching constants
+        """
+        return self.db.query(DBConstant).filter(DBConstant.name == name).all()
+
+    def get_all_trait_method_signatures(self) -> List[DBTraitMethodSignature]:
+        """
+        Get all trait method signatures.
+        Returns:
+            List of trait method signatures
+        """
+        return self.db.query(DBTraitMethodSignature).all()
+
+    def get_trait_method_signatures_for_trait(
+        self, trait_id: int
+    ) -> List[DBTraitMethodSignature]:
+        """
+        Get all method signatures for a given trait.
+        Args:
+            trait_id: ID of the trait
+        Returns:
+            List of method signatures for the trait
+        """
+        return (
+            self.db.query(DBTraitMethodSignature)
+            .filter(DBTraitMethodSignature.trait_id == trait_id)
+            .all()
+        )
+
+    def find_by_fully_qualified_path(self, fqp: str) -> List[Any]:
+        """
+        Find any entity by its fully qualified path.
+        Args:
+            fqp: Fully qualified path
+        Returns:
+            List of matching entities
+        """
+        results = []
+        for entity_name, entity_class in self.entity_mapping.items():
+            if hasattr(entity_class, "fully_qualified_path"):
+                results.extend(
+                    self.db.query(entity_class)
+                    .filter(entity_class.fully_qualified_path == fqp)
+                    .all()
+                )
+        return results
+
+    def find_by_visibility(
+        self, entity_type: str, visibility: str
+    ) -> List[Any]:
+        """
+        Find entities of a given type with a specific visibility.
+        Args:
+            entity_type: Type of entity to search for
+            visibility: Visibility to filter by
+        Returns:
+            List of matching entities
+        """
+        entity_class = self.entity_mapping.get(entity_type)
+        if not entity_class or not hasattr(entity_class, "visibility"):
+            return []
+
+        return (
+            self.db.query(entity_class)
+            .filter(entity_class.visibility == visibility)
+            .all()
+        )
+
+    def find_by_crate(self, entity_type: str, crate_name: str) -> List[Any]:
+        """
+        Find entities of a given type that belong to a specific crate.
+        Args:
+            entity_type: Type of entity to search for
+            crate_name: Name of the crate
+        Returns:
+            List of matching entities
+        """
+        entity_class = self.entity_mapping.get(entity_type)
+        if not entity_class or not hasattr(entity_class, "crate_name"):
+            return []
+
+        return (
+            self.db.query(entity_class)
+            .filter(entity_class.crate_name == crate_name)
+            .all()
+        )
+
+    def find_functions_with_input_type(self, type_name: str) -> List[DBFunction]:
+        """
+        Find all functions that accept a specific type as one of their inputs.
+        Args:
+            type_name: The name of the input type to search for.
+        Returns:
+            A list of functions that have the specified input type.
+        """
+        # Handle both JSON string and JSON array formats
+        return (
+            self.db.query(DBFunction)
+            .filter(
+                or_(
+                    # For JSON array format
+                    DBFunction.input_types.contains([{"type_name": type_name}]),
+                    # For JSON string format - use multiple LIKE patterns to be more robust
+                    DBFunction.input_types.like(f'%"type_name": "{type_name}"%'),
+                    DBFunction.input_types.like(f'%"type_name":"{type_name}"%'),
+                    DBFunction.input_types.like(f'%{type_name}%')
+                )
+            )
+            .all()
+        )
+
+    def find_functions_with_output_type(self, type_name: str) -> List[DBFunction]:
+        """
+        Find all functions that return a specific type.
+        Args:
+            type_name: The name of the output type to search for.
+        Returns:
+            A list of functions that have the specified output type.
+        """
+        # Handle both JSON string and JSON array formats
+        return (
+            self.db.query(DBFunction)
+            .filter(
+                or_(
+                    # For JSON array format
+                    DBFunction.output_types.contains([{"type_name": type_name}]),
+                    # For JSON string format - use multiple LIKE patterns to be more robust
+                    DBFunction.output_types.like(f'%"type_name": "{type_name}"%'),
+                    DBFunction.output_types.like(f'%"type_name":"{type_name}"%'),
+                    DBFunction.output_types.like(f'%{type_name}%')
+                )
+            )
+            .all()
+        )
+
+    def find_entities_with_attribute(
+        self, entity_type: str, attribute: str
+    ) -> List[Any]:
+        """
+        Find entities (like functions or types) that are decorated with a specific attribute.
+        Args:
+            entity_type: The type of entity to search for (e.g., 'function', 'type').
+            attribute: The attribute to search for.
+        Returns:
+            A list of entities that have the specified attribute.
+        """
+        entity_class = self.entity_mapping.get(entity_type)
+        if not entity_class or not hasattr(entity_class, "attributes"):
+            return []
+
+        # Handle both string and array formats for attributes
+        return (
+            self.db.query(entity_class)
+            .filter(
+                or_(
+                    entity_class.attributes.contains([attribute]),  # JSON array format
+                    entity_class.attributes == attribute,           # String format
+                    entity_class.attributes.like(f"%{attribute}%")  # Substring match in string
+                )
+            )
+            .all()
+        )

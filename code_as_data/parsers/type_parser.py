@@ -190,5 +190,68 @@ class TypeParser:
             types = self._load_type_file(file_path, raw_code)
             if types:
                 self.typesPerModule[module_name] = types
+        # ---- Rust FileAnalysis JSONs
+        rust_jsons = [
+            f for f in list_files_recursive(self.json_path, pattern=".json")
+            if not f.endswith(".hs.json")
+            and not f.endswith(".hs.type.typechecker.json")
+            and not f.endswith(".hs.types_code.json")
+            and not f.endswith(".hs.module_imports.json")
+        ]
+        for file_path in rust_jsons:
+            try:
+                with open(file_path, "r") as f:
+                    obj = json.load(f)
+            except Exception:
+                continue
+
+            # Only handle Rust FileAnalysis that actually has type_definitions
+            if not isinstance(obj, dict) or "type_definitions" not in obj:
+                continue
+
+            def _infer_mod(o: Dict[str, Any]) -> str:
+                for bucket in ("type_definitions", "functions", "impl_blocks",
+                               "use_statements", "trait_method_signatures",
+                               "constant_definitions", "module_declarations"):
+                    for it in o.get(bucket, []) or []:
+                        crate = it.get("crate_name")
+                        modp  = it.get("module_path") or ""
+                        if crate:
+                            return f"{crate}{('::' + modp) if modp else ''}"
+                        fqp = it.get("fully_qualified_path")
+                        if fqp:
+                            return fqp.rsplit("::", 1)[0] if "::" in fqp else fqp
+                return "<unknown_crate>"
+
+            module_name = _infer_mod(obj)
+            file_src    = obj.get("file_path", file_path)
+
+            rows: List[Type] = []
+            for t in obj.get("type_definitions", []) or []:
+                try:
+                    rows.append(Type(
+                        type_name=t.get("name"),
+                        module_name=module_name,
+                        raw_code=t.get("src_code", ""),
+                        src_loc=t.get("src_location", file_src),
+                        line_number_start=t.get("line_number_start", -1),
+                        line_number_end=t.get("line_number_end", -1),
+                        fully_qualified_path=t.get("fully_qualified_path"),
+                        fields=t.get("fields"),
+                        visibility=t.get("visibility"),
+                        doc_comments=t.get("doc_comments"),
+                        attributes=t.get("attributes"),
+                        crate_name=t.get("crate_name"),
+                        module_path=t.get("module_path"),
+                        type=TypeOfType.resolve_value(
+                            t.get("type_kind", t.get("typeKind", "data"))
+                        ),
+                    ))
+                except Exception as e:
+                    error_trace(e)
+                    continue
+
+            if rows:
+                self.typesPerModule.setdefault(module_name, []).extend(rows)
 
         return self.typesPerModule

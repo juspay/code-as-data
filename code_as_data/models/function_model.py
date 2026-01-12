@@ -14,6 +14,19 @@ class FunctionCalled(BaseModel):
     id: Optional[str] = None
     function_signature: Optional[str] = None
 
+    # --- Rust additions ---------------------------------------------------
+    fully_qualified_path: Optional[str] = None                  # Rust
+    is_method:            Optional[bool] = None                 # Rust
+    receiver_type:        Optional[Dict[str, Any]] = None       # Rust (JSON of TypeOriginInfo)
+    input_types:          Optional[List[Dict[str, Any]]] = None # Rust
+    output_types:         Optional[List[Dict[str, Any]]] = None # Rust
+    line_number:          Optional[int] = None                  # Rust
+    column_number:        Optional[int] = None                  # Rust
+    origin_crate:         Optional[str] = None                  # Rust
+    origin_module:        Optional[str] = None                  # Rust
+    call_type:            Optional[str] = None                  # Rust ("function","method","macro")
+
+
     def __init__(self, **data):
         # Rename 'name' to 'function_name' if needed
         if "name" in data and not data.get("function_name"):
@@ -43,27 +56,59 @@ class WhereFunction(BaseModel):
     functions_called: List[FunctionCalled] = Field(default_factory=list)
     where_functions: Dict[str, "WhereFunction"] = Field(default_factory=dict)
 
+    # --- Rust extras -----------------------------------------------------
+    fully_qualified_path: Optional[str] = None
+    input_types:          Optional[list] = None
+    output_types:         Optional[list] = None
+    types_used:           Optional[list] = None
+    literals_used:        Optional[list] = None
+    methods_called:       Optional[list] = None
+    is_method:            Optional[bool] = None
+    self_type:            Optional[dict] = None
+    visibility:           Optional[str] = None
+    doc_comments:         Optional[str] = None
+    attributes:           Optional[List[Dict[str, Any]]] = None
+
+
+
 
 class Function(BaseModel):
     """Main function model."""
 
     # Core attributes
-    module_name: str
+    module_name: str 
     function_name: str
-    id: Optional[str] = None
-    function_signature: Optional[str] = None
-    src_loc: Optional[str] = None
-    raw_string: Optional[str] = None
-    type_enum: str
-    line_number_start: int
-    line_number_end: int
-    instances_used: Optional[List[Any]] = None
-    function_input: Optional[List[Any]] = None
-    function_output: Optional[List[Any]] = None
+    id: Optional[str] = None 
+    function_signature: Optional[str] = None 
+    src_loc: Optional[str] = None 
+    raw_string: Optional[str] = None 
+    type_enum: str 
+    line_number_start: int 
+    line_number_end: int 
+    instances_used: Optional[List[Any]] = None 
+    function_input: Optional[List[Any]] = None 
+    function_output: Optional[List[Any]] = None 
 
     # Nested structures
     functions_called: List[FunctionCalled] = Field(default_factory=list)
     where_functions: Dict[str, WhereFunction] = Field(default_factory=dict)
+
+    # ---------- Rust-specific ----------
+    fully_qualified_path: Optional[str] = None
+    is_method:            Optional[bool] = None
+    self_type:            Optional[dict] = None
+    input_types:          Optional[list] = None
+    output_types:         Optional[list] = None
+    types_used:           Optional[list] = None
+    literals_used:        Optional[list] = None
+    methods_called:       Optional[list] = None
+    visibility:           Optional[str] = None
+    doc_comments:         Optional[str] = None
+    attributes:           Optional[List[Dict[str, Any]]] = None
+    crate_name:           Optional[str] = None
+    module_path:          Optional[str] = None
+    impl_block_id:        Optional[int] = None          # FK stored by importer
+
 
     def __init__(self, **data):
         # Construct id if not provided
@@ -81,6 +126,17 @@ class Function(BaseModel):
                     package_name=i.get("package_name"),
                     src_loc=i.get("src_loc"),
                     _type=i.get("type_enum", i.get("_type", "")),
+                    # -- Rust additions
+                    fully_qualified_path=i.get("fully_qualified_path"),
+                    is_method=i.get("is_method"),
+                    receiver_type=i.get("receiver_type"),
+                    input_types=i.get("input_types"),
+                    output_types=i.get("output_types"),
+                    line_number=i.get("line_number"),
+                    column_number=i.get("column_number"),
+                    origin_crate=i.get("origin_crate"),
+                    origin_module=i.get("origin_module"),
+                    call_type=i.get("call_type"),
                 )
                 for i in data["functions_called"]
             ]
@@ -107,6 +163,18 @@ class Function(BaseModel):
                     "src_loc": i.get("src_loc", src_loc),
                     "functions_called": i.get("functions_called", []),
                     "where_functions": i.get("where_functions", {}),
+                    # -- Rust additions
+                    "fully_qualified_path": i.get("fully_qualified_path"),
+                    "input_types": i.get("input_types"),
+                    "output_types": i.get("output_types"),
+                    "types_used": i.get("types_used"),
+                    "literals_used": i.get("literals_used"),
+                    "methods_called": i.get("methods_called"),
+                    "is_method": i.get("is_method"),
+                    "self_type": i.get("self_type"),
+                    "visibility": i.get("visibility"),
+                    "doc_comments": i.get("doc_comments"),
+                    "attributes": i.get("attributes"),
                 }
 
                 where_functions_dict[function_name] = WhereFunction(
@@ -133,3 +201,6 @@ class Function(BaseModel):
             function_str = f"```haskell\n{function_str}\n```"
 
         return function_str
+
+# recurse pydantic self-reference
+WhereFunction.model_rebuild()

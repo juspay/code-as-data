@@ -28,3 +28,6 @@ tqdm==4.67.1
 typing_extensions==4.12.2
 neo4j
 pyvis
+chardet==5.2.0
+beautifulsoup4==4.12.3
+lxml==5.3.0
